@@ -6,12 +6,15 @@
 %%% caller is expected to disregard the request and return the orginal `Base'
 %%% for the interaction in an unmodified form.
 -module(dev_security).
--include_lib("include/hb.hrl").
+-include_lib("hb/include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 %%% Device API.
 -export([compute/3]).
 %%% Public utility API.
 -export([validate/4, validate/5]).
+
+-implements(<<"security@1.0">>).
+-device_libraries([lib_process]).
 
 %% @doc Compute the security-normalized request.
 compute(Base, Req, Opts) ->
@@ -24,7 +27,7 @@ compute(Base, Req, Opts) ->
             ?event(
                 security_error,
                 {security_error,
-                    {process, dev_process_lib:process_id(Base, Opts)},
+                    {process, lib_process:process_id(Base, #{}, Opts)},
                     {slot, hb_maps:get(<<"slot">>, Req, no_slot, Opts)},
                     {reason, Reason}
                 },
