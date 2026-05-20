@@ -1,0 +1,9 @@
+{application, ao_token_package,
+    [
+        {description, "HyperBEAM device"},
+        {vsn, "0.1.0"},
+        {registered, []},
+        {applications, [kernel, stdlib, hb]},
+        {env, []},
+        {modules, []}
+    ]}.
