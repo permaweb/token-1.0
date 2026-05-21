@@ -54,7 +54,7 @@ notify(Msg, Base, Opts) ->
             },
             Opts
         ),
-        {ok, Action} ?= hb_maps:find(<<"action">>, Msg, <<"action">>, Opts),
+        {ok, Action} ?= find_or_error(<<"action">>, Msg, <<"action">>, Opts),
         Target = hb_maps:get(<<"target">>, Msg, <<"broadcast">>, Opts),
         Subscribers = subscribers(Base, Action, Target, Opts),
         ?event(debug_subscriptions,
@@ -98,6 +98,12 @@ notify(Msg, Base, Opts) ->
             Base
     end.
 
+find_or_error(Key, Map, ErrorTerm, Opts) ->
+    case hb_maps:find(Key, Map, Opts) of
+        {ok, Value} -> {ok, Value};
+        error -> {error, ErrorTerm}
+    end.
+
 %% @doc Unsubscribe to a subject and target from a request.
 unsubscribe(State, Req, Opts) ->
     manage_subscription(State, Req, unset, Opts).
@@ -124,21 +130,21 @@ manage_subscription(State, Req, SubscriptionInfo, Opts) ->
     maybe
         Msg = hb_ao:get(<<"body">>, Req, Opts),
         {ok, Action} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"subscribe-action">>,
                 Msg,
                 <<"No `subscribe-action' key to filter upon provided.">>,
                 Opts
             ),
         {ok, Subject} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"subscribe-target">>,
                 Msg,
                 <<"broadcast">>,
                 Opts
             ),
         {ok, Listener} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"from">>,
                 Msg,
                 <<"No security-normalized `from' key found in request.">>,
@@ -239,7 +245,25 @@ original_from_forwarded(Req, Opts) ->
 
 %% @doc Extract keys with X- prefix for forwarding in notices
 %% Follows AO token pattern: keys beginning with "X-" are forwarded.
-forwarded_keys(Req, Opts) -> hb_maps:with_prefix([<<"x-">>], Req, Opts).
+forwarded_keys(Req, Opts) -> with_prefix([<<"x-">>], Req, Opts).
+
+with_prefix(Prefixes, Map, Opts) when is_list(Prefixes) ->
+    PrefixBins = [hb_util:to_lower(hb_util:bin(P)) || P <- Prefixes],
+    hb_maps:filter(
+        fun(Key, _Value) ->
+            KeyBin = hb_util:to_lower(hb_util:bin(Key)),
+            lists:any(
+                fun(Prefix) ->
+                    binary:match(KeyBin, Prefix) =:= {0, byte_size(Prefix)}
+                end,
+                PrefixBins
+            )
+        end,
+        Map,
+        Opts
+    );
+with_prefix(Prefix, Map, Opts) ->
+    with_prefix([Prefix], Map, Opts).
 
 %% @doc Uncommit a message and transform all keys into their `x-` forwarded form.
 forward_keys(Msg, Opts) ->

@@ -49,7 +49,7 @@
 -module(dev_pot).
 -include_lib("hb/include/hb.hrl").
 -implements(<<"pot@1.0">>).
--device_libraries([lib_process_outbox]).
+-device_libraries([lib_process_outbox, lib_token]).
 -include_lib("eunit/include/eunit.hrl").
 %%% Public API.
 -export([info/1, mint/3, deposit/3, withdraw/3, delegate/3, undelegate/3]).
@@ -60,7 +60,7 @@
 -export([update_deposit_index/5]).
 -export([user/3, balance/3, balances/1, balances/2]).
 -export([get_deposit/4, get_deposits/2, get_deposits/3]).
-%%% `~pot@1.0` dev_token:validate_address custom denylist
+%%% `~pot@1.0` lib_token:validate_address custom denylist
 -define(RESERVED_KEYS, [
     <<"balances">>,
     <<"resources">>,
@@ -315,7 +315,7 @@ initialize_subscriptions(Base, _Req, Opts) ->
 %% balance with the unclaimed yield.
 balance(Addr, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(Addr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(Addr, ?RESERVED_KEYS),
         hb_maps:get(Addr, hb_maps:get(<<"balances">>, S, #{}, Opts), 0, Opts)
             + unclaimed_yield(Addr, S, Opts)
     end.
@@ -323,7 +323,7 @@ balance(Addr, S, Opts) ->
 %% @doc Return the unclaimed yield across all resources for a specific address.
 unclaimed_yield(Addr, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(Addr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(Addr, ?RESERVED_KEYS),
         ResourceIDs =
             hb_maps:keys(
                 hb_private:reset(
@@ -342,8 +342,8 @@ end.
 %% @doc Return the unclaimed yield for a specific address in a specific resource.
 unclaimed_yield(Addr, ResourceID, UndrippedS, Opts) ->
     maybe
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
-        true ?= dev_token:validate_address(Addr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(Addr, ?RESERVED_KEYS),
         GlobalDrippedS = drip_global(UndrippedS, Opts),
         ?event(debug_pot,
             {unclaimed_yield,
@@ -428,23 +428,23 @@ parse_deposit_modification(Base, Assignment, Opts) ->
     Req = hb_ao:get(<<"body">>, Assignment, Opts),
     maybe
         {ok, Address} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"address">>,
                 Req,
                 <<"No `address' provided.">>,
                 Opts
             ),
-        true ?= dev_token:validate_address(Address, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(Address, ?RESERVED_KEYS),
         {ok, ResourceID} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"resource">>,
                 Req,
                 <<"No resource ID provided.">>,
                 Opts
             ),
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         {ok, Amount} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"quantity">>,
                 Req,
                 <<"No `quantity' provided.">>,
@@ -472,34 +472,44 @@ parse_deposit_modification(Base, Assignment, Opts) ->
 verify_resource_authority(ResourceID, Base, Req, Opts) ->
     maybe
         {ok, From} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"from">>,
                 Req,
                 <<"No `from' address provided.">>,
                 Opts
             ),
         {ok, Resources} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"resources">>,
                 Base,
                 <<"No resources found in mint state.">>,
                 Opts
             ),
         {ok, Resource} ?= 
-            hb_maps:find(
+            find_or_error(
                 ResourceID,
                 Resources,
                 <<"Requested resource not initialized in mint state.">>,
                 Opts
             ),
         true ?=
-            dev_security:validate(
+            security_validate(
                 <<"authority">>,
                 Resource,
                 Req,
                 From,
                 Opts#{ dev_security_mode => prod }
             )
+    end.
+
+security_validate(Key, Base, SubjectMsg, From, Opts) ->
+    {ok, Security} = hb_device_load:reference(<<"security@1.0">>, Opts),
+    Security:validate(Key, Base, SubjectMsg, From, Opts).
+
+find_or_error(Key, Map, ErrorTerm, Opts) ->
+    case hb_maps:find(Key, Map, Opts) of
+        {ok, Value} -> {ok, Value};
+        error -> {error, ErrorTerm}
     end.
 
 %% @doc Interpret forwarded `register' notifications from the configured
@@ -510,27 +520,27 @@ verify_resource_authority(ResourceID, Base, Req, Opts) ->
 notify(State, Assignment, Opts) ->
     maybe
         {ok, Req} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"body">>,
                 Assignment,
                 <<"Notification is not an assignment.">>,
                 Opts
             ),
         {ok, NotifyFrom} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"from">>,
                 Req,
                 <<"No `from' address provided.">>,
                 Opts
             ),
         {ok, Parent} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"parent">>,
                 State,
                 <<"No `parent` configured for notifications">>,
                 Opts
             ),
-        true ?= dev_token:validate_address(NotifyFrom, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(NotifyFrom, ?RESERVED_KEYS),
         true ?= (NotifyFrom =:= Parent) orelse
             {error, <<"Invalid notification source">>},
         ForwardedMsg = lib_process_outbox:original_from_forwarded(Req, Opts),
@@ -543,8 +553,7 @@ notify(State, Assignment, Opts) ->
         true ?= (Action =:= <<"register">>) orelse
             {error, <<"Unsupported notification action">>},
         OriginalFrom = hb_maps:get(<<"from">>, ForwardedMsg, <<"unknown">>, Opts),
-        dev_token:handle_action(
-            Action,
+        register(
             State,
             #{
                 <<"type">> => <<"notification">>,
@@ -607,31 +616,31 @@ delegate(State, Assignment, Opts) ->
     Req = hb_ao:get(<<"body">>, Assignment, Opts),
     maybe
         {ok, FromAddr} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"from">>,
                 Req,
                 <<"No `from' address provided.">>,
                 Opts
             ),
-        true ?= dev_token:validate_address(FromAddr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(FromAddr, ?RESERVED_KEYS),
         {ok, ToAddr} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"address">>,
                 Req,
                 <<"No recipient `address' to delegate to provided.">>,
                 Opts
             ),
-        true ?= dev_token:validate_address(ToAddr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ToAddr, ?RESERVED_KEYS),
         {ok, ResourceID} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"resource">>,
                 Req,
                 <<"No `resource' ID to delegate on provided.">>,
                 Opts
             ),
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         {ok, Amount} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"quantity">>,
                 Req,
                 <<"No `quantity' to delegate provided.">>,
@@ -648,9 +657,9 @@ delegate(State, Assignment, Opts) ->
 -spec delegate(binary(), binary(), binary(), pos_integer(), map(), map()) -> {ok, map()} | {error, term()}.
 delegate(FromAddr, ToAddr, ResourceID, Amount, S, Opts) when is_integer(Amount), Amount > 0 ->
     maybe
-        true ?= dev_token:validate_address(FromAddr, ?RESERVED_KEYS),
-        true ?= dev_token:validate_address(ToAddr, ?RESERVED_KEYS),
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(FromAddr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ToAddr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         ?event(
             {delegating,
                 {from_addr, FromAddr},
@@ -792,9 +801,9 @@ undelegate(State, Assignment, Opts) ->
         {ok, ToAddr} ?= hb_maps:find(<<"address">>, Req, Opts),
         {ok, ResourceID} ?= hb_maps:find(<<"resource">>, Req, Opts),
         {ok, Amount} ?= hb_maps:find(<<"quantity">>, Req, Opts),
-        true ?= dev_token:validate_address(FromAddr, ?RESERVED_KEYS),
-        true ?= dev_token:validate_address(ToAddr, ?RESERVED_KEYS),
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(FromAddr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ToAddr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         StateWithT = ensure_initialized(State, Assignment, Opts),
         {ok, NewState} ?=
             undelegate(FromAddr, ToAddr, ResourceID, Amount, StateWithT, Opts),
@@ -806,9 +815,9 @@ undelegate(State, Assignment, Opts) ->
 -spec undelegate(binary(), binary(), binary(), pos_integer(), map(), map()) -> {ok, map()} | {error, term()}.
 undelegate(FromAddr, ToAddr, ResourceID, Amount, S, Opts) when is_integer(Amount), Amount > 0 ->
     maybe
-        true ?= dev_token:validate_address(FromAddr, ?RESERVED_KEYS),
-        true ?= dev_token:validate_address(ToAddr, ?RESERVED_KEYS),
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(FromAddr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ToAddr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         ExistingDelegationBefore =
             case FromAddr =:= ToAddr of
                 true -> 0;
@@ -1013,15 +1022,15 @@ register(State, Assignment, Opts) ->
     maybe
         Req = hb_ao:get(<<"body">>, Assignment,Opts),
         {ok, ResID} ?= 
-            hb_maps:find(
+            find_or_error(
                 <<"resource">>, 
                 Req,
                 <<"No `resource' provided to register.">>, 
                 Opts
             ),
-        true ?= dev_token:validate_address(ResID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResID, ?RESERVED_KEYS),
         {ok, From} ?= 
-            hb_maps:find(
+            find_or_error(
                 <<"from">>, 
                 Req,
                 <<"No `from' address provided.">>, 
@@ -1132,7 +1141,7 @@ enforce_resource_config_authority(From, State, Req, Opts) ->
         AuthRes = case (hb_maps:get(<<"parent">>, State, no_parent, Opts) =:= From) of
             true -> true;
             false -> 
-                case dev_security:validate(<<"mint-authority">>, State, Req, From, Opts#{dev_security_mode => prod}) of
+                case security_validate(<<"mint-authority">>, State, Req, From, Opts#{dev_security_mode => prod}) of
                     true -> true;
                     {error, _} ->
                         {error, <<"Caller is not authorized to configure resources.">>}
@@ -1153,7 +1162,7 @@ enforce_resource_weight_authority(ResourceID, From, State, Req, Opts) ->
                     case verify_weight_authority(ResourceID, State, Req, Opts) of
                         true -> true;
                         {error, _} ->
-                            case dev_security:validate(
+                            case security_validate(
                                 <<"mint-authority">>,
                                 State,
                                 Req,
@@ -1174,28 +1183,28 @@ enforce_resource_weight_authority(ResourceID, From, State, Req, Opts) ->
 verify_weight_authority(ResourceID, Base, Req, Opts) ->
     maybe
         {ok, From} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"from">>,
                 Req,
                 <<"No `from' address provided.">>,
                 Opts
             ),
         {ok, Resources} ?=
-            hb_maps:find(
+            find_or_error(
                 <<"resources">>,
                 Base,
                 <<"No resources found in mint state.">>,
                 Opts
             ),
         {ok, Resource} ?=
-            hb_maps:find(
+            find_or_error(
                 ResourceID,
                 Resources,
                 <<"Requested resource not initialized in mint state.">>,
                 Opts
             ),
         true ?=
-            dev_security:validate(
+            security_validate(
                 <<"weight-authority">>,
                 Resource,
                 Req,
@@ -1206,7 +1215,7 @@ verify_weight_authority(ResourceID, Base, Req, Opts) ->
 %% @doc Update the authority record for a specific resource in the pot.
 register_resource_authority(ResourceID, Authority, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         true ?= validate_signer_config(Authority, Opts),
         hb_ao:set(
             S,
@@ -1217,7 +1226,7 @@ register_resource_authority(ResourceID, Authority, S, Opts) ->
 end.
 register_resource_authority_required(ResourceID, Required, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         true ?= validate_signer_config(Required, Opts),
         hb_ao:set(
             S,
@@ -1228,7 +1237,7 @@ register_resource_authority_required(ResourceID, Required, S, Opts) ->
 end.
 register_resource_authority_match(ResourceID, Match, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         true ?= validate_match_config(Match),
         hb_ao:set(
             S,
@@ -1240,7 +1249,7 @@ end.
 %% @doc Update the weight-authority record for a specific resource in the pot.
 register_resource_weight_authority(ResourceID, Authority, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         true ?= validate_signer_config(Authority, Opts),
         hb_ao:set(
             S,
@@ -1251,7 +1260,7 @@ register_resource_weight_authority(ResourceID, Authority, S, Opts) ->
 end.
 register_resource_weight_authority_required(ResourceID, Required, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         true ?= validate_signer_config(Required, Opts),
         hb_ao:set(
             S,
@@ -1262,7 +1271,7 @@ register_resource_weight_authority_required(ResourceID, Required, S, Opts) ->
 end.
 register_resource_weight_authority_match(ResourceID, Match, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         true ?= validate_match_config(Match),
         hb_ao:set(
             S,
@@ -1287,7 +1296,7 @@ validate_signer_config(Value, _Opts) when is_list(Value) ->
                 true ->
                     lists:foldl(
                         fun(Signer, true) ->
-                            dev_token:validate_address(Signer, ?RESERVED_KEYS);
+                            lib_token:validate_address(Signer, ?RESERVED_KEYS);
                            (_Signer, {error, _} = Err) ->
                             Err
                         end,
@@ -1315,7 +1324,7 @@ register_resource(ResourceID, Weight, S, Opts) ->
     register_resource(ResourceID, Weight, keep_existing, S, Opts).
 register_resource(ResourceID, Weight, QuantityScale, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         true ?= is_valid_quantity_scale(QuantityScale),
         true ?= is_valid_weight(Weight),
         % Run the global drip to ensure the state is up to date.
@@ -1434,8 +1443,8 @@ send_resource_config_notice(ResourceID, Weight, QuantityScale, S, Opts) ->
 modify_deposit_state(Addr, ResourceID, Amount, S0, Opts) ->
     % Drip the global state and the resource, then extract necessary components.
     maybe
-        true ?= dev_token:validate_address(Addr, ?RESERVED_KEYS),
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(Addr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         GlobalDrippedS = drip_global(S0, Opts),
         DrippedS = #{
             <<"balances">> := Balances,
@@ -1531,8 +1540,8 @@ end.
 %% @doc Get the deposit quantity for a specific address in a specific resource.
 get_deposit(Addr, ResourceID, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(Addr, ?RESERVED_KEYS),
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(Addr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         hb_ao:get(
             <<"/resources/", ResourceID/binary, "/deposits/", Addr/binary, "/quantity">>,
             S,
@@ -1557,7 +1566,7 @@ get_deposits(S = #{ <<"resources">> := Resources }, Opts) ->
 %% deposit-address keys from state.
 get_deposits(ResourceID, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(ResourceID, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(ResourceID, ?RESERVED_KEYS),
         Ds = hb_ao:get(
             <<"/resources/", ResourceID/binary, "/deposits">>,
             S,
@@ -1579,7 +1588,7 @@ end.
 %% @doc Return the contents of the inverted index for a specific address.
 user(Addr, S, Opts) ->
     maybe
-        true ?= dev_token:validate_address(Addr, ?RESERVED_KEYS),
+        true ?= lib_token:validate_address(Addr, ?RESERVED_KEYS),
         hb_ao:get(<<"/users/", Addr/binary>>, S, #{}, Opts)
     end.
 normalize_quantity(Qty, QuantityScale)

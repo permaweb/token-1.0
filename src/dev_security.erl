@@ -7,14 +7,13 @@
 %%% for the interaction in an unmodified form.
 -module(dev_security).
 -include_lib("hb/include/hb.hrl").
+-implements(<<"security@1.0">>).
+-device_libraries([lib_process]).
 -include_lib("eunit/include/eunit.hrl").
 %%% Device API.
 -export([compute/3]).
 %%% Public utility API.
 -export([validate/4, validate/5]).
-
--implements(<<"security@1.0">>).
--device_libraries([lib_process]).
 
 %% @doc Compute the security-normalized request.
 compute(Base, Req, Opts) ->
