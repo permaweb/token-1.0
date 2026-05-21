@@ -11,7 +11,7 @@
 -include_lib("hb/include/hb.hrl").
 
 -implements(<<"token@1.0">>).
--device_libraries([lib_process, lib_process_outbox]).
+-device_libraries([lib_process, lib_process_outbox, lib_trie]).
 
 %% @doc `Action' values that should be handled by the `mint-device'.
 -define(MINT_ACTIONS,
@@ -422,7 +422,7 @@ enforce_set_authority(Base, Req, Opts) ->
             (SetAuthorityMatch =/= not_found)
         of
             true ->
-                dev_security:validate(
+                security_validate(
                     <<"set-authority">>,
                     Base,
                     Req,
@@ -458,7 +458,7 @@ enforce_legacy_set_authority(Setter, Base, Opts) ->
 
 %% @doc Validate address format for security. the validation
 %% allows binary addresses up to 128 bytes and prevent invalid
-%% addresses such as dev_trie reserved keys.
+%% addresses such as lib_trie reserved keys.
 validate_address(Address, CustomList) when is_binary(Address), is_list(CustomList) ->
     ReservedKeys = ?AO_RESERVED_ADDRESS_KEYS ++ CustomList,
     case byte_size(Address) of
@@ -466,7 +466,7 @@ validate_address(Address, CustomList) when is_binary(Address), is_list(CustomLis
         N when N > 128 -> {error, <<"Address is too long.">>};
         _ ->
             maybe
-                true ?= (not dev_trie:is_reserved_key(Address))
+                true ?= (not lib_trie:is_reserved_key(Address))
                     orelse {error, <<"Address uses a reserved trie internal key.">>},
                 true ?= (not is_reserved_custom_key(Address, ReservedKeys))
                     orelse {error, <<"Address is a reserved ao/custom key">>},
@@ -484,6 +484,11 @@ is_reserved_custom_key(Key, List) when is_binary(Key), is_list(List) ->
     lists:member(Key, List);
 is_reserved_custom_key(_, _) -> 
     false.
+
+security_validate(Key, Base, SubjectMsg, From, Opts) ->
+    {ok, Security} = hb_device_load:reference(<<"security@1.0">>, Opts),
+    Security:validate(Key, Base, SubjectMsg, From, Opts).
+
 send_error(Base, Assignment, Reason, Opts) when is_atom(Reason) ->
     send_error(Base, Assignment, atom_to_binary(Reason), Opts);
 send_error(Base, Assignment, Reason, Opts) when not is_binary(Reason) ->
