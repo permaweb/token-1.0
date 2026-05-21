@@ -1,6 +1,6 @@
 %%% @doc A small utility library for working with process outboxes.
--module(dev_process_outbox).
--include("include/hb.hrl").
+-module(lib_process_outbox).
+-include_lib("hb/include/hb.hrl").
 -export([send/3, forwarded_keys/2, notify/3]).
 -export([subscribe/3, unsubscribe/3, subscribers/3, subscribers/4]).
 -export([send_subscription_request/4, send_subscription_request/5]).
@@ -144,7 +144,7 @@ manage_subscription(State, Req, SubscriptionInfo, Opts) ->
                 <<"No security-normalized `from' key found in request.">>,
                 Opts
             ),
-        ProcessID = dev_process_lib:process_id(State, Opts),
+        ProcessID = lib_process:process_id(State, #{}, Opts),
         ?event(
             subscriptions_short,
             {set_subscription_info,
@@ -187,7 +187,7 @@ manage_subscription(State, Req, SubscriptionInfo, Opts) ->
             ?event(
                 debug_subscriptions,
                 {error_setting_subscription,
-                    {process_id, dev_process_lib:process_id(State, Opts)},
+                    {process_id, lib_process:process_id(State, #{}, Opts)},
                     {state, State},
                     {request, Req},
                     {reason, Reason}

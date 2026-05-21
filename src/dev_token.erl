@@ -8,7 +8,10 @@
 -export([handle_action/4]).
 %%% Public helpers.
 -export([validate_address/2]).
--include_lib("include/hb.hrl").
+-include_lib("hb/include/hb.hrl").
+
+-implements(<<"token@1.0">>).
+-device_libraries([lib_process, lib_process_outbox]).
 
 %% @doc `Action' values that should be handled by the `mint-device'.
 -define(MINT_ACTIONS,
@@ -127,7 +130,7 @@ restore_device(Device, Base, Opts) ->
 
 %% @doc Enforce the security constraints of the base state upon the request.
 enforce_security(Base, Req, Opts) ->
-    case dev_process_lib:run_as(<<"security">>, Base, Req, Opts) of
+    case lib_process:run_as(<<"security">>, Base, Req, Opts) of
         {ok, SecureReq} -> {ok, SecureReq};
         {skip, Reason} -> {error, Reason}
     end.
@@ -135,13 +138,13 @@ enforce_security(Base, Req, Opts) ->
 %% @doc Route the request to the appropriate key resolution function, depending
 %% upon the `action' specified.
 handle_action(Action, Base, Req, Opts) ->
-    Self = dev_process_lib:process_id(Base, Opts),
+    Self = lib_process:process_id(Base, #{}, Opts),
     ?event(token_short, {token, {id, Self}, {action, Action}}, Opts),
     case hb_util:to_lower(hb_ao:normalize_key(Action)) of
         <<"transfer">> -> transfer(Base, Req, Opts);
         <<"set">> -> secure_set(Base, Req, Opts);
-        <<"subscribe">> -> dev_process_outbox:subscribe(Base, Req, Opts);
-        <<"unsubscribe">> -> dev_process_outbox:unsubscribe(Base, Req, Opts);
+        <<"subscribe">> -> lib_process_outbox:subscribe(Base, Req, Opts);
+        <<"unsubscribe">> -> lib_process_outbox:unsubscribe(Base, Req, Opts);
         MintDevAction -> action_as_mint_device(MintDevAction, Base, Req, Opts)
     end.
 
@@ -248,7 +251,7 @@ transfer(Base, Assignment, Opts) ->
                     hb_maps:put(<<"balances">>, NewBalances, NormBase, Opts)
             end,
         % Send transfer notices.
-        WithNotices = dev_process_outbox:send(
+        WithNotices = lib_process_outbox:send(
             transfer_notices(From, Recipient, Quantity, Req, Opts),
             NewBaseAfterTransfer,
             Opts
@@ -269,7 +272,7 @@ transfer(Base, Assignment, Opts) ->
 
 transfer_notices(From, Recipient, Quantity, Req, Opts) ->
     % Extract forwarded keys (X- prefixed fields from request)
-    ForwardedKeys = dev_process_outbox:forwarded_keys(Req, Opts),
+    ForwardedKeys = lib_process_outbox:forwarded_keys(Req, Opts),
     DebitNotice =
         ForwardedKeys#{
             <<"action">> => <<"Debit-Notice">>,
@@ -336,7 +339,7 @@ action_as_mint_device(Action, Base, Req, Opts) ->
 
 %% @doc Run a given `path' on the mint device.
 as_mint_device(Path, Base, Req, Opts) ->
-    dev_process_lib:run_as(
+    lib_process:run_as(
         <<"mint">>,
         ensure_mint_device(Base, Opts),
         Req#{ <<"path">> => Path },
@@ -497,7 +500,7 @@ send_error(Base, Assignment, Reason, Opts) when is_binary(Reason) ->
             {ok, Base};
         {ok, Target} ->
             {ok,
-                dev_process_outbox:send(
+                lib_process_outbox:send(
                     #{
                         <<"target">> => Target,       
                         <<"reason">> => Reason
