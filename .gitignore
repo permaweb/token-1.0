@@ -4,6 +4,7 @@ ebin/
 cache-mainnet
 logs
 .eunit/
+ignored-tests/
 *.beam
 *.crashdump
 erl_crash.dump
