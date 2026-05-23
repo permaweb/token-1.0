@@ -332,13 +332,18 @@ is_supported_mint_action(Action) ->
 %% and if so, switch to the mint device and run it. Unsupported actions fall through
 %% send_error/4 codepath.
 action_as_mint_device(Action, Base, Req, Opts) ->
-    case is_supported_mint_action(Action) of
-        true when Action =:= <<"mint">> -> mint(Base, Req, Opts);
-        true -> as_mint_device(Action, Base, Req, Opts);
-        false ->
-            ?event(error, {unsupported_token_action, Action}, Opts),
-            send_error(Base, Req, <<"unsupported action: ", Action/binary>>, Opts)
-        end.
+    case hb_ao:get(<<"mint-device">>, Base, undefined, Opts) of
+        undefined ->
+            send_error(Base, Req, <<"mint-device not configured">>, Opts);
+        _ ->
+            case is_supported_mint_action(Action) of
+                true when Action =:= <<"mint">> -> mint(Base, Req, Opts);
+                true -> as_mint_device(Action, Base, Req, Opts);
+                false ->
+                    ?event(error, {unsupported_token_action, Action}, Opts),
+                    send_error(Base, Req, <<"unsupported action: ", Action/binary>>, Opts)
+            end
+    end.
 
 %% @doc Run a given `path' on the mint device.
 as_mint_device(Path, Base, Req, Opts) ->

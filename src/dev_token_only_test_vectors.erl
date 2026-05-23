@@ -185,13 +185,13 @@ fixed_supply_without_mint_device_cannot_mint_test() ->
             Opts
         ),
     ?assertEqual(not_found, hb_ao:get(<<"mint-device">>, Base, Opts)),
-    ?assertMatch(
-        {error, {device_not_loadable, _, _}},
-        catch mint(Base, Minter, Minter, 1, Opts)
-    ),
-    ?assertEqual(1, balance(Base, Owner, Opts)),
-    ?assertEqual(0, balance(Base, Minter, Opts)),
-    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)).
+    {ok, MintRejected} = mint(Base, Minter, Minter, 1, Opts),
+    [Notice] = outbox(MintRejected, Opts),
+    ?assertEqual(<<"mint-device not configured">>, hb_ao:get(<<"reason">>, Notice, Opts)),
+    ?assertEqual(Minter, hb_ao:get(<<"target">>, Notice, Opts)),
+    ?assertEqual(1, balance(MintRejected, Owner, Opts)),
+    ?assertEqual(0, balance(MintRejected, Minter, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, MintRejected, Opts)).
 
 fixed_supply_name_token_flow_test() ->
     Opts = opts(),
@@ -243,13 +243,13 @@ fixed_supply_name_token_flow_test() ->
     ?assertEqual(0, balance(Transferred, Owner, Opts)),
     ?assertEqual(1, balance(Transferred, NewOwner, Opts)),
     ?assertEqual(1, hb_ao:get(<<"total-supply">>, Transferred, Opts)),
-    ?assertMatch(
-        {error, {device_not_loadable, _, _}},
-        catch mint(Transferred, Owner, Owner, 1, Opts)
-    ),
-    ?assertEqual(0, balance(Transferred, Owner, Opts)),
-    ?assertEqual(1, balance(Transferred, NewOwner, Opts)),
-    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Transferred, Opts)).
+    {ok, MintRejected} = mint(Transferred, Owner, Owner, 1, Opts),
+    [Notice | _] = outbox(MintRejected, Opts),
+    ?assertEqual(<<"mint-device not configured">>, hb_ao:get(<<"reason">>, Notice, Opts)),
+    ?assertEqual(Owner, hb_ao:get(<<"target">>, Notice, Opts)),
+    ?assertEqual(0, balance(MintRejected, Owner, Opts)),
+    ?assertEqual(1, balance(MintRejected, NewOwner, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, MintRejected, Opts)).
 
 insufficient_balance_transfer_rejected_test() ->
     Opts = opts(),
