@@ -316,9 +316,12 @@ mint(Base, Assignment, Opts) ->
 %% @doc Execute the mint device's main key, but return the state in its 
 %% unmodified form if the execution returns an error.
 normalize_mint(Base, Assignment, Opts) ->
-    case mint(Base, Assignment, Opts) of
+    try mint(Base, Assignment, Opts) of
         {ok, NewBase} -> {ok, NewBase};
         {error, _} -> {ok, Base}
+    catch
+        throw:{error, {device_not_loadable, _Device, _Reason}} ->
+            {ok, Base}
     end.
 
 %% @doc Check if the action is supported by the mint device interface.
