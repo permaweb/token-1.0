@@ -37,8 +37,6 @@ token_state(Params, Opts) ->
         maps:merge(
             #{
                 <<"device">> => <<"token@1.0">>,
-                <<"mint-device">> => <<"mint-authority@1.0">>,
-                <<"mint-authority">> => id(<<"minter">>),
                 <<"name">> => <<"Test Token">>,
                 <<"ticker">> => <<"TEST">>,
                 <<"denomination">> => 0,
@@ -74,6 +72,21 @@ transfer(State, From, To, Quantity, Opts) ->
                 #{
                     <<"from">> => From,
                     <<"recipient">> => To,
+                    <<"quantity">> => Quantity
+                }
+        },
+        Opts
+    ).
+
+mint(State, From, Recipient, Quantity, Opts) ->
+    dev_token:handle_action(
+        <<"mint">>,
+        State,
+        #{
+            <<"body">> =>
+                #{
+                    <<"from">> => From,
+                    <<"recipient">> => Recipient,
                     <<"quantity">> => Quantity
                 }
         },
@@ -158,6 +171,85 @@ fixed_supply_transfer_test() ->
     ?assertEqual(0, balance(Updated, Alice, Opts)),
     ?assertEqual(1, balance(Updated, Bob, Opts)),
     ?assertEqual(1, hb_ao:get(<<"total-supply">>, Updated, Opts)).
+
+fixed_supply_without_mint_device_cannot_mint_test() ->
+    Opts = opts(),
+    Owner = id(<<"owner">>),
+    Minter = id(<<"minter">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Owner => 1 }
+            },
+            Opts
+        ),
+    ?assertEqual(not_found, hb_ao:get(<<"mint-device">>, Base, Opts)),
+    ?assertMatch(
+        {error, {device_not_loadable, _, _}},
+        catch mint(Base, Minter, Minter, 1, Opts)
+    ),
+    ?assertEqual(1, balance(Base, Owner, Opts)),
+    ?assertEqual(0, balance(Base, Minter, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)).
+
+fixed_supply_name_token_flow_test() ->
+    Opts = opts(),
+    Owner = id(<<"owner">>),
+    NewOwner = id(<<"new-owner">>),
+    Admin = <<"pnp-admin">>,
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Owner => 1 },
+                extra =>
+                    #{
+                        <<"set-authority">> => Admin,
+                        <<"whitelisted-fields">> =>
+                            [
+                                <<"name">>,
+                                <<"logo">>,
+                                <<"asset-type">>
+                            ]
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(not_found, hb_ao:get(<<"mint-device">>, Base, Opts)),
+    ?assertEqual(
+        {error, <<"Caller is not the `set-authority'.">>},
+        set_field(Base, Owner, #{ <<"name">> => <<"alice">> }, Opts)
+    ),
+    {ok, WithMetadata} =
+        set_field(
+            Base,
+            Admin,
+            #{
+                <<"name">> => <<"pnp-name">>,
+                <<"logo">> => <<"logo-tx-id">>,
+                <<"asset-type">> => <<"pnp">>
+            },
+            Opts
+        ),
+    ?assertEqual(<<"pnp-name">>, hb_ao:get(<<"name">>, WithMetadata, Opts)),
+    ?assertEqual(<<"logo-tx-id">>, hb_ao:get(<<"logo">>, WithMetadata, Opts)),
+    ?assertEqual(<<"pnp">>, hb_ao:get(<<"asset-type">>, WithMetadata, Opts)),
+    ?assertEqual(
+        {error, <<"Attempted to set non-whitelisted fields.">>},
+        set_field(WithMetadata, Admin, #{ <<"total-supply">> => 2 }, Opts)
+    ),
+    {ok, Transferred} = transfer(WithMetadata, Owner, NewOwner, 1, Opts),
+    ?assertEqual(0, balance(Transferred, Owner, Opts)),
+    ?assertEqual(1, balance(Transferred, NewOwner, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Transferred, Opts)),
+    ?assertMatch(
+        {error, {device_not_loadable, _, _}},
+        catch mint(Transferred, Owner, Owner, 1, Opts)
+    ),
+    ?assertEqual(0, balance(Transferred, Owner, Opts)),
+    ?assertEqual(1, balance(Transferred, NewOwner, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Transferred, Opts)).
 
 insufficient_balance_transfer_rejected_test() ->
     Opts = opts(),
