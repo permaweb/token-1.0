@@ -210,7 +210,7 @@ fixed_supply_name_token_flow_test() ->
                             [
                                 <<"name">>,
                                 <<"logo">>,
-                                <<"type">>
+                                <<"asset-type">>
                             ]
                     }
             },
@@ -228,13 +228,13 @@ fixed_supply_name_token_flow_test() ->
             #{
                 <<"name">> => <<"pnp-name">>,
                 <<"logo">> => <<"logo-tx-id">>,
-                <<"type">> => <<"pnp">>
+                <<"asset-type">> => <<"pnp">>
             },
             Opts
         ),
     ?assertEqual(<<"pnp-name">>, hb_ao:get(<<"name">>, WithMetadata, Opts)),
     ?assertEqual(<<"logo-tx-id">>, hb_ao:get(<<"logo">>, WithMetadata, Opts)),
-    ?assertEqual(<<"pnp">>, hb_ao:get(<<"type">>, WithMetadata, Opts)),
+    ?assertEqual(<<"pnp">>, hb_ao:get(<<"asset-type">>, WithMetadata, Opts)),
     ?assertEqual(
         {error, <<"Attempted to set non-whitelisted fields.">>},
         set_field(WithMetadata, Admin, #{ <<"total-supply">> => 2 }, Opts)
