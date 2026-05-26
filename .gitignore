@@ -1,10 +1,11 @@
 _build/
 _checkouts/
 ebin/
-cache-mainnet
+cache-*/
+scripts/
+debug/
 logs
 .eunit/
-ignored-tests/
 *.beam
 *.crashdump
 erl_crash.dump

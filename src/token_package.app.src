@@ -1,6 +1,6 @@
-{application, ao_token_package,
+{application, token_package,
     [
-        {description, "HyperBEAM device"},
+        {description, "token execution device package"},
         {vsn, "0.1.0"},
         {registered, []},
         {applications, [kernel, stdlib, hb]},
