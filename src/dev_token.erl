@@ -80,9 +80,32 @@ init(Base, _Req, _Opts) ->
 normalize(Base, _Req, _Opts) ->
     {ok, Base}.
 
-%% @doc No special processing for the creation of snapshots.
-snapshot(Base, _Req, _Opts) ->
-    {ok, Base}.
+%% @doc Create a self-contained token checkpoint. The token state is serialized
+%% into the data body so balance trie keys never become transport tag names.
+snapshot(Base, _Req, Opts) ->
+    ProcID = lib_process:process_id(Base, #{}, Opts),
+    State0 = hb_maps:without([<<"snapshot">>, <<"process">>], Base, Opts),
+    State1 = hb_private:reset(State0),
+    State = hb_private:reset(hb_cache:ensure_all_loaded(State1, Opts)),
+    Payload = term_to_binary(State),
+    Snapshot = #{
+        <<"type">> => <<"Checkpoint">>,
+        <<"checkpoint-device">> => <<"token@1.0">>,
+        <<"checkpoint-format">> => <<"erlang-term-v1">>,
+        <<"content-type">> => <<"application/octet-stream">>,
+        <<"content-encoding">> => <<"gzip">>,
+        <<"process-id">> => ProcID,
+        <<"state-size">> => byte_size(Payload),
+        <<"sha-256">> => hb_util:human_id(crypto:hash(sha256, Payload)),
+        <<"timestamp">> => os:system_time(millisecond),
+        <<"data">> => zlib:gzip(Payload)
+    },
+    {ok,
+        case hb_ao:get(<<"at-slot">>, Base, undefined, Opts) of
+            undefined -> Snapshot;
+            Slot -> Snapshot#{ <<"checkpoint-slot">> => Slot }
+        end
+    }.
 
 %% @doc Entrypoint for computations on token processes. Deduplicates by signed
 %% assignment body, then expects the `action' key to hold the `path' to execute
