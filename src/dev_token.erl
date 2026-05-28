@@ -76,9 +76,18 @@ end.
 init(Base, _Req, _Opts) ->
     {ok, Base}.
 
-%% @doc No-op on normalization.
-normalize(Base, _Req, _Opts) ->
-    {ok, Base}.
+%% @doc Restore token checkpoints when `~process@1.0' loads a cached snapshot.
+normalize(Base, _Req, Opts) ->
+    case hb_maps:get(<<"snapshot">>, Base, not_found, Opts) of
+        not_found ->
+            {ok, Base};
+        Snapshot0 ->
+            Snapshot = hb_cache:ensure_all_loaded(Snapshot0, Opts),
+            case is_token_checkpoint(Snapshot) of
+                true -> restore_checkpoint(Base, Snapshot, Opts);
+                false -> {ok, Base}
+            end
+    end.
 
 %% @doc Create a self-contained token checkpoint. The token state is serialized
 %% into the data body so balance trie keys never become transport tag names.
@@ -106,6 +115,137 @@ snapshot(Base, _Req, Opts) ->
             Slot -> Snapshot#{ <<"checkpoint-slot">> => Slot }
         end
     }.
+
+is_token_checkpoint(Snapshot) when is_map(Snapshot) ->
+    maps:get(<<"checkpoint-device">>, Snapshot, not_found) =:= <<"token@1.0">>;
+is_token_checkpoint(_Snapshot) ->
+    false.
+
+restore_checkpoint(Base, Snapshot, Opts) ->
+    case validate_checkpoint_metadata(Base, Snapshot, Opts) of
+        {ok, Process} ->
+            case decode_checkpoint_state(Snapshot) of
+                {ok, State} ->
+                    case validate_checkpoint_state(State) of
+                        ok ->
+                            Restored0 =
+                                hb_maps:without(
+                                    [<<"snapshot">>, <<"process">>],
+                                    State,
+                                    Opts
+                                ),
+                            {ok,
+                                hb_maps:put(
+                                    <<"process">>,
+                                    Process,
+                                    Restored0,
+                                    Opts
+                                )
+                            };
+                        Error ->
+                            Error
+                    end;
+                Error ->
+                    Error
+            end;
+        Error ->
+            Error
+    end.
+
+validate_checkpoint_metadata(Base, Snapshot, Opts) ->
+    RequiredFields = [
+        {<<"type">>, <<"Checkpoint">>},
+        {<<"checkpoint-device">>, <<"token@1.0">>},
+        {<<"checkpoint-format">>, <<"erlang-term-v1">>},
+        {<<"content-type">>, <<"application/octet-stream">>},
+        {<<"content-encoding">>, <<"gzip">>}
+    ],
+    case validate_checkpoint_fields(Snapshot, RequiredFields) of
+        ok ->
+            BaseWithProcess = lib_process:ensure_process_key(Base, Opts),
+            ProcID = lib_process:process_id(BaseWithProcess, #{}, Opts),
+            case maps:get(<<"process-id">>, Snapshot, not_found) of
+                ProcID ->
+                    case hb_maps:get(
+                        <<"process">>,
+                        BaseWithProcess,
+                        not_found,
+                        Opts
+                    ) of
+                        not_found -> checkpoint_error(missing_process);
+                        Process -> {ok, Process}
+                    end;
+                _ ->
+                    checkpoint_error(process_id_mismatch)
+            end;
+        Error ->
+            Error
+    end.
+
+validate_checkpoint_fields(_Snapshot, []) ->
+    ok;
+validate_checkpoint_fields(Snapshot, [{Key, Expected}|Rest]) ->
+    case maps:get(Key, Snapshot, not_found) of
+        Expected -> validate_checkpoint_fields(Snapshot, Rest);
+        _ -> checkpoint_error({invalid_field, Key})
+    end.
+
+decode_checkpoint_state(Snapshot) ->
+    case {
+        maps:get(<<"data">>, Snapshot, not_found),
+        maps:get(<<"state-size">>, Snapshot, not_found),
+        maps:get(<<"sha-256">>, Snapshot, not_found)
+    } of
+        {Data, StateSize, Hash}
+                when is_binary(Data), is_integer(StateSize),
+                     StateSize >= 0, is_binary(Hash) ->
+            case gunzip_checkpoint(Data) of
+                {ok, Payload} ->
+                    ExpectedHash =
+                        hb_util:human_id(crypto:hash(sha256, Payload)),
+                    case {
+                        byte_size(Payload) =:= StateSize,
+                        ExpectedHash =:= Hash
+                    } of
+                        {true, true} -> decode_checkpoint_payload(Payload);
+                        {false, _} -> checkpoint_error(state_size_mismatch);
+                        {_, false} -> checkpoint_error(hash_mismatch)
+                    end;
+                Error ->
+                    Error
+            end;
+        _ ->
+            checkpoint_error(invalid_payload_metadata)
+    end.
+
+gunzip_checkpoint(Data) ->
+    try zlib:gunzip(Data) of
+        Payload -> {ok, Payload}
+    catch
+        _:_ -> checkpoint_error(invalid_gzip)
+    end.
+
+decode_checkpoint_payload(Payload) ->
+    try binary_to_term(Payload, [safe]) of
+        State -> {ok, State}
+    catch
+        _:_ -> checkpoint_error(invalid_erlang_term)
+    end.
+
+validate_checkpoint_state(State) when is_map(State) ->
+    case {
+        maps:get(<<"device">>, State, not_found),
+        maps:get(<<"balances">>, State, not_found)
+    } of
+        {<<"token@1.0">>, Balances} when is_map(Balances) -> ok;
+        {<<"token@1.0">>, _} -> checkpoint_error(invalid_balances);
+        _ -> checkpoint_error(invalid_token_state)
+    end;
+validate_checkpoint_state(_State) ->
+    checkpoint_error(invalid_token_state).
+
+checkpoint_error(Reason) ->
+    {error, {invalid_token_checkpoint, Reason}}.
 
 %% @doc Entrypoint for computations on token processes. Deduplicates by signed
 %% assignment body, then expects the `action' key to hold the `path' to execute
