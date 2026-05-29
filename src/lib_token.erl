@@ -27,6 +27,8 @@
 %% @doc Validate token account/resource address format.
 validate_address(Address, CustomList) when is_binary(Address), is_list(CustomList) ->
     ReservedKeys = ?AO_RESERVED_ADDRESS_KEYS ++ CustomList,
+    AccountKey = account_key(Address),
+    CanonicalReservedKeys = [account_key(Key) || Key <- ReservedKeys, is_binary(Key)],
     case byte_size(Address) of
         0 -> {error, <<"Address cannot be empty.">>};
         N when N > 128 -> {error, <<"Address is too long.">>};
@@ -34,7 +36,11 @@ validate_address(Address, CustomList) when is_binary(Address), is_list(CustomLis
             maybe
                 true ?= (not lib_trie:is_reserved_key(Address))
                     orelse {error, <<"Address uses a reserved trie internal key.">>},
+                true ?= (not lib_trie:is_reserved_key(AccountKey))
+                    orelse {error, <<"Address uses a reserved trie internal key.">>},
                 true ?= (not is_reserved_custom_key(Address, ReservedKeys))
+                    orelse {error, <<"Address is a reserved ao/custom key">>},
+                true ?= (not is_reserved_custom_key(AccountKey, CanonicalReservedKeys))
                     orelse {error, <<"Address is a reserved ao/custom key">>},
                 case binary:match(
                     Address,
@@ -48,6 +54,9 @@ validate_address(Address, CustomList) when is_binary(Address), is_list(CustomLis
     end;
 validate_address(_, _) ->
     {error, <<"Address must be a binary.">>}.
+
+account_key(Address) when is_binary(Address) ->
+    hb_util:to_lower(Address).
 
 is_reserved_custom_key(Key, List) when is_binary(Key), is_list(List) ->
     lists:member(Key, List);
