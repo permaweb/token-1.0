@@ -8,7 +8,7 @@ opts() ->
     #{
         <<"load-remote-devices">> => false,
         <<"priv-wallet">> => ar_wallet:new(),
-        store => [hb_test_utils:test_store()]
+        <<"store">> => [hb_test_utils:test_store()]
     }.
 
 id(Bin) when is_binary(Bin) ->
@@ -300,6 +300,46 @@ self_transfer_keeps_balance_test() ->
     {ok, Updated} = transfer(Base, Alice, Alice, 3, Opts),
     ?assertEqual(5, balance(Updated, Alice, Opts)),
     ?assertEqual(5, hb_ao:get(<<"total-supply">>, Updated, Opts)).
+
+snapshot_normalize_roundtrip_test() ->
+    Opts = opts(),
+    Alice = id(<<"Alice">>),
+    Bob = id(<<"Bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{
+                    Alice => 10,
+                    Bob => 2
+                }
+            },
+            Opts
+        ),
+    {ok, Snapshot} = dev_token:snapshot(Base, #{}, Opts),
+    ?assertEqual(<<"Checkpoint">>, maps:get(<<"type">>, Snapshot)),
+    ?assertEqual(<<"token@1.0">>, maps:get(<<"checkpoint-device">>, Snapshot)),
+    ?assert(is_binary(maps:get(<<"data">>, Snapshot))),
+    Payload = zlib:gunzip(maps:get(<<"data">>, Snapshot)),
+    ?assertEqual(maps:get(<<"state-size">>, Snapshot), byte_size(Payload)),
+    ?assertEqual(
+        maps:get(<<"sha-256">>, Snapshot),
+        hb_util:human_id(crypto:hash(sha256, Payload))
+    ),
+    Decoded = binary_to_term(Payload, [safe]),
+    ?assertNot(maps:is_key(<<"snapshot">>, Decoded)),
+    ?assertNot(maps:is_key(<<"process">>, Decoded)),
+    RestoreBase =
+        hb_maps:put(
+            <<"snapshot">>,
+            Snapshot,
+            hb_maps:remove(<<"balances">>, Base, Opts),
+            Opts
+        ),
+    {ok, Restored} = dev_token:normalize(RestoreBase, #{}, Opts),
+    ?assertEqual(10, balance(Restored, Alice, Opts)),
+    ?assertEqual(2, balance(Restored, Bob, Opts)),
+    ?assertNot(maps:is_key(<<"snapshot">>, Restored)),
+    ?assert(maps:is_key(<<"process">>, Restored)).
 
 reserved_recipient_transfer_rejected_test() ->
     Opts = opts(),
