@@ -34,25 +34,7 @@ ledger(Extra, Opts) ->
             undefined -> Extra;
             RawBalance ->
                 Extra#{
-                    <<"balances">> =>
-                        maps:from_list(
-                            lists:filtermap(
-                                fun({ID, Amount}) when ?IS_ID(ID) ->
-                                    {true, {hb_util:human_id(ID), Amount}};
-                                ({Wallet, Amount}) when is_tuple(Wallet) ->
-                                    {
-                                        true,
-                                        {
-                                            hb_util:human_id(Wallet),
-                                            Amount
-                                        }
-                                    };
-                                (_Other) ->
-                                    false
-                                end,
-                                maps:to_list(RawBalance)
-                            )
-                        )
+                    <<"balances">> => canonical_balances(RawBalance)
                 }
         end,
     ?event(debug_test, {mod_extra, ModExtra}),
@@ -205,7 +187,11 @@ push(Process, Msg, MsgWallet, RawOpts) ->
 balance(ProcMsg, User, Opts) when not ?IS_ID(User) ->
     balance(ProcMsg, hb_util:human_id(ar_wallet:to_address(User)), Opts);
 balance(ProcMsg, ID, Opts) ->
-    hb_ao:get(<<"now/balances/", ID/binary>>, ProcMsg, 0, Opts).
+    Account = account_key(ID),
+    case hb_ao:get(<<"now/balances/", Account/binary>>, ProcMsg, not_found, Opts) of
+        not_found -> hb_ao:get(<<"now/balances/", ID/binary>>, ProcMsg, 0, Opts);
+        Balance -> Balance
+    end.
 
 %% @doc Retrieve a single balance through the execution device's `balance`
 %% path, allowing lazy mint devices to normalize account state first.
@@ -467,3 +453,23 @@ normalize_env(Procs) when is_list(Procs) ->
 %% @doc Return the normalized environment without the root ledger.
 normalize_without_root(RootProc, Procs) ->
     maps:without([hb_message:id(RootProc, all)], normalize_env(Procs)).
+
+account_key(Account) when is_binary(Account) ->
+    hb_util:to_lower(Account).
+
+canonical_balances(Balances) ->
+    lists:foldl(
+        fun
+            ({ID, Amount}, Acc) when ?IS_ID(ID) ->
+                add_balance(account_key(hb_util:human_id(ID)), Amount, Acc);
+            ({Wallet, Amount}, Acc) when is_tuple(Wallet) ->
+                add_balance(account_key(hb_util:human_id(Wallet)), Amount, Acc);
+            (_Other, Acc) ->
+                Acc
+        end,
+        #{},
+        maps:to_list(Balances)
+    ).
+
+add_balance(Account, Amount, Balances) ->
+    Balances#{ Account => maps:get(Account, Balances, 0) + Amount }.

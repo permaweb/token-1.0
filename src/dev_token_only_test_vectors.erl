@@ -18,8 +18,22 @@ id(Bin) when is_binary(Bin) ->
 id(Other) ->
     hb_util:human_id(Other).
 
+account_key(Account) ->
+    hb_util:to_lower(Account).
+
+canonical_balances(Balances) ->
+    maps:fold(
+        fun(Account, Amount, Acc) ->
+            Key = account_key(Account),
+            Acc#{ Key => maps:get(Key, Acc, 0) + Amount }
+        end,
+        #{},
+        Balances
+    ).
+
 token_state(Params, Opts) ->
-    InitialBalances = maps:get(initial_balances, Params, #{}),
+    InitialBalances =
+        canonical_balances(maps:get(initial_balances, Params, #{})),
     TotalSupply =
         maps:get(
             total_supply,
@@ -49,7 +63,7 @@ token_state(Params, Opts) ->
 
 balance(State, Account, Opts) ->
     Balances = hb_ao:get(<<"balances">>, State, Opts),
-    case hb_ao:resolve(Balances, Account, Opts) of
+    case hb_ao:resolve(Balances, account_key(Account), Opts) of
         {ok, Amount} -> Amount;
         {error, not_found} -> 0
     end.
@@ -111,6 +125,50 @@ balance_existing_account_test() ->
         ),
     ?assertEqual({ok, 7}, public_balance(Base, Alice, Opts)).
 
+mixed_case_initial_balance_uses_canonical_account_test() ->
+    Opts = opts(),
+    Alice = id(<<"Alice">>),
+    Base =
+        token_state(
+            #{ initial_balances => #{ Alice => 7 } },
+            Opts
+        ),
+    Balances = hb_ao:get(<<"balances">>, Base, Opts),
+    ?assertEqual({error, not_found}, hb_ao:resolve(Balances, Alice, Opts)),
+    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, account_key(Alice), Opts)),
+    ?assertEqual({ok, 7}, public_balance(Base, Alice, Opts)),
+    ?assertEqual({ok, 7}, public_balance(Base, account_key(Alice), Opts)).
+
+init_canonicalizes_raw_initial_balances_test() ->
+    Opts = opts(),
+    Alice = id(<<"Alice">>),
+    {ok, RawBalances} =
+        hb_ao:resolve(
+            #{ <<"device">> => <<"trie@1.0">> },
+            #{ Alice => 7, <<"path">> => <<"set">> },
+            Opts
+        ),
+    Base =
+        lib_process:ensure_process_key(
+            hb_message:commit(
+                #{
+                    <<"device">> => <<"token@1.0">>,
+                    <<"name">> => <<"Test Token">>,
+                    <<"ticker">> => <<"TEST">>,
+                    <<"denomination">> => 0,
+                    <<"total-supply">> => 7,
+                    <<"balances">> => RawBalances
+                },
+                Opts
+            ),
+            Opts
+        ),
+    {ok, Initialized} = dev_token:init(Base, #{}, Opts),
+    Balances = hb_ao:get(<<"balances">>, Initialized, Opts),
+    ?assertEqual({error, not_found}, hb_ao:resolve(Balances, Alice, Opts)),
+    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, account_key(Alice), Opts)),
+    ?assertEqual({ok, 7}, public_balance(Initialized, Alice, Opts)).
+
 balance_missing_account_returns_zero_test() ->
     Opts = opts(),
     Alice = id(<<"alice">>),
@@ -128,6 +186,18 @@ balance_reserved_account_rejected_test() ->
     ?assertEqual(
         {error, <<"Address is a reserved ao/custom key">>},
         public_balance(Base, <<"path">>, Opts)
+    ).
+
+uppercase_reserved_account_rejected_test() ->
+    Opts = opts(),
+    Base = token_state(#{}, Opts),
+    ?assertEqual(
+        {error, <<"Address is a reserved ao/custom key">>},
+        public_balance(Base, <<"PATH">>, Opts)
+    ),
+    ?assertEqual(
+        {error, <<"Address uses a reserved trie internal key.">>},
+        public_balance(Base, <<"DEVICE">>, Opts)
     ).
 
 basic_transfer_updates_balances_test() ->
@@ -154,6 +224,42 @@ basic_transfer_updates_balances_test() ->
         [<<"Credit-Notice">>, <<"Debit-Notice">>],
         lists:sort([hb_ao:get(<<"action">>, Notice, Opts) || Notice <- Notices])
     ).
+
+mixed_case_transfer_updates_canonical_balances_test() ->
+    Opts = opts(),
+    Alice = id(<<"Alice">>),
+    Bob = id(<<"Bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{
+                    Alice => 10,
+                    Bob => 1
+                }
+            },
+            Opts
+        ),
+    {ok, Updated} = transfer(Base, Alice, Bob, 3, Opts),
+    ?assertEqual(7, balance(Updated, Alice, Opts)),
+    ?assertEqual(4, balance(Updated, Bob, Opts)),
+    ?assertEqual(7, balance(Updated, account_key(Alice), Opts)),
+    ?assertEqual(4, balance(Updated, account_key(Bob), Opts)),
+    Notices = outbox(Updated, Opts),
+    [Debit] = [
+        Notice
+    ||
+        Notice <- Notices,
+        hb_ao:get(<<"action">>, Notice, Opts) =:= <<"Debit-Notice">>
+    ],
+    [Credit] = [
+        Notice
+    ||
+        Notice <- Notices,
+        hb_ao:get(<<"action">>, Notice, Opts) =:= <<"Credit-Notice">>
+    ],
+    ?assertEqual(Alice, hb_ao:get(<<"target">>, Debit, Opts)),
+    ?assertEqual(Bob, hb_ao:get(<<"target">>, Credit, Opts)),
+    ?assertEqual(Alice, hb_ao:get(<<"sender">>, Credit, Opts)).
 
 fixed_supply_transfer_test() ->
     Opts = opts(),
