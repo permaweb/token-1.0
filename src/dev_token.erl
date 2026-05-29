@@ -72,9 +72,9 @@ end.
 
 %%% `~process@1.0' interface implementation.
 
-%% @doc No-op on process initialization.
-init(Base, _Req, _Opts) ->
-    {ok, Base}.
+%% @doc Canonicalize account keys in the initial balance trie.
+init(Base, _Req, Opts) ->
+    canonicalize_balances(Base, Opts).
 
 %% @doc Restore token checkpoints when `~process@1.0' loads a cached snapshot.
 normalize(Base, _Req, Opts) ->
@@ -247,6 +247,47 @@ validate_checkpoint_state(_State) ->
 checkpoint_error(Reason) ->
     {error, {invalid_token_checkpoint, Reason}}.
 
+canonicalize_balances(Base, Opts) ->
+    case hb_maps:get(<<"balances">>, Base, not_found, Opts) of
+        not_found ->
+            {ok, Base};
+        Balances0 ->
+            Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
+            case is_map(Balances) of
+                true -> canonicalize_balances(Base, Balances, Opts);
+                false -> {ok, Base}
+            end
+    end.
+
+canonicalize_balances(Base, Balances, Opts) ->
+    {Changed, FlatBalances} =
+        lists:foldl(
+            fun(Key, {ChangedAcc, BalancesAcc}) ->
+                Account = account_key(Key),
+                {ok, Amount} = hb_ao:resolve(Balances, Key, Opts),
+                {
+                    ChangedAcc
+                        orelse (Account =/= Key)
+                        orelse maps:is_key(Account, BalancesAcc),
+                    add_balance(Account, Amount, BalancesAcc)
+                }
+            end,
+            {false, #{}},
+            lib_trie:keys(Balances, Opts)
+        ),
+    case Changed of
+        false ->
+            {ok, Base};
+        true ->
+            {ok, NewBalances} =
+                hb_ao:resolve(
+                    #{<<"device">> => <<"trie@1.0">>},
+                    FlatBalances#{<<"path">> => <<"set">>},
+                    Opts
+                ),
+            {ok, hb_maps:put(<<"balances">>, NewBalances, Base, Opts)}
+    end.
+
 %% @doc Entrypoint for computations on token processes. Deduplicates by signed
 %% assignment body, then expects the `action' key to hold the `path' to execute
 %% after enforcing the token's security constraints. Always returns the base
@@ -315,12 +356,14 @@ handle_action(Action, Base, Req, Opts) ->
 %% account before returning.
 balance(Base, Req, Opts) ->
     maybe
-        {ok, Account} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
-        true ?= validate_address(Account, []),
+        {ok, Account0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
+        true ?= validate_address(Account0, []),
+        Account = account_key(Account0),
         ?event(
             debug_token,
             {balance_request,
-                {account, Account},
+                {account, Account0},
+                {canonical_account, Account},
                 {base, Base}
             },
             Opts
@@ -359,12 +402,14 @@ transfer(Base, Assignment, Opts) ->
     maybe
         % Gather transfer data from the request.
         {ok, Req} ?= hb_ao:resolve(Assignment, <<"body">>, Opts),
-        {ok, From} ?= hb_ao:resolve(Req, <<"from">>, Opts),
-        {ok, Recipient} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
+        {ok, From0} ?= hb_ao:resolve(Req, <<"from">>, Opts),
+        {ok, Recipient0} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
         {ok, Quantity} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
         % validate From/Recipient sanity
-        true ?= validate_address(From, []),
-        true ?= validate_address(Recipient, []),
+        true ?= validate_address(From0, []),
+        true ?= validate_address(Recipient0, []),
+        From = account_key(From0),
+        Recipient = account_key(Recipient0),
         % Normalize the base's minting state for the sender.
         {ok, NormBase} ?=
             normalize_mint(
@@ -415,7 +460,7 @@ transfer(Base, Assignment, Opts) ->
             end,
         % Send transfer notices.
         WithNotices = lib_process_outbox:send(
-            transfer_notices(From, Recipient, Quantity, Req, Opts),
+            transfer_notices(From0, Recipient0, Quantity, Req, Opts),
             NewBaseAfterTransfer,
             Opts
         ),
@@ -470,7 +515,13 @@ mint(Base, Assignment, Opts) ->
                 {ok, Subject} ->
                     maybe
                         true ?= validate_address(Subject, []),
-                        MintReq1 = hb_ao:set(Assignment, <<"subject">>, Subject, Opts),
+                        MintReq1 =
+                            hb_ao:set(
+                                Assignment,
+                                <<"subject">>,
+                                account_key(Subject),
+                                Opts
+                            ),
                         as_mint_device(<<"mint">>, Base, MintReq1, Opts)
                     end
             end
@@ -632,6 +683,8 @@ enforce_legacy_set_authority(Setter, Base, Opts) ->
 %% addresses such as lib_trie reserved keys.
 validate_address(Address, CustomList) when is_binary(Address), is_list(CustomList) ->
     ReservedKeys = ?AO_RESERVED_ADDRESS_KEYS ++ CustomList,
+    AccountKey = account_key(Address),
+    CanonicalReservedKeys = [account_key(Key) || Key <- ReservedKeys, is_binary(Key)],
     case byte_size(Address) of
         0 -> {error, <<"Address cannot be empty.">>};
         N when N > 128 -> {error, <<"Address is too long.">>};
@@ -639,7 +692,11 @@ validate_address(Address, CustomList) when is_binary(Address), is_list(CustomLis
             maybe
                 true ?= (not lib_trie:is_reserved_key(Address))
                     orelse {error, <<"Address uses a reserved trie internal key.">>},
+                true ?= (not lib_trie:is_reserved_key(AccountKey))
+                    orelse {error, <<"Address uses a reserved trie internal key.">>},
                 true ?= (not is_reserved_custom_key(Address, ReservedKeys))
+                    orelse {error, <<"Address is a reserved ao/custom key">>},
+                true ?= (not is_reserved_custom_key(AccountKey, CanonicalReservedKeys))
                     orelse {error, <<"Address is a reserved ao/custom key">>},
                 % Check for path separators (security: prevent path traversal) and whitespaces.
                 case binary:match(Address, [<<"/">>, <<"\\">>, <<" ">>, <<"\n">>, <<"\r">>, <<"\t">>]) of
@@ -650,6 +707,13 @@ validate_address(Address, CustomList) when is_binary(Address), is_list(CustomLis
     end;
 validate_address(_, _) ->
     {error, <<"Address must be a binary.">>}.
+
+account_key(Address) when is_binary(Address) ->
+    hb_util:to_lower(Address).
+
+add_balance(Account, Amount, Balances) ->
+    Balances#{ Account => maps:get(Account, Balances, 0) + Amount }.
+
 %% @doc Check if the given Key exists in the passed List
 is_reserved_custom_key(Key, List) when is_binary(Key), is_list(List) ->
     lists:member(Key, List);
