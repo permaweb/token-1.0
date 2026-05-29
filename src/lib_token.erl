@@ -33,10 +33,11 @@ validate_address(Address, CustomList) when is_binary(Address), is_list(CustomLis
         0 -> {error, <<"Address cannot be empty.">>};
         N when N > 128 -> {error, <<"Address is too long.">>};
         _ ->
+            TrieReservedKeys = trie_reserved_keys(),
             maybe
-                true ?= (not lib_trie:is_reserved_key(Address))
+                true ?= (not is_reserved_trie_key(Address, TrieReservedKeys))
                     orelse {error, <<"Address uses a reserved trie internal key.">>},
-                true ?= (not lib_trie:is_reserved_key(AccountKey))
+                true ?= (not is_reserved_trie_key(AccountKey, TrieReservedKeys))
                     orelse {error, <<"Address uses a reserved trie internal key.">>},
                 true ?= (not is_reserved_custom_key(Address, ReservedKeys))
                     orelse {error, <<"Address is a reserved ao/custom key">>},
@@ -57,6 +58,13 @@ validate_address(_, _) ->
 
 account_key(Address) when is_binary(Address) ->
     hb_util:to_lower(Address).
+
+is_reserved_trie_key(Key, ReservedKeys) ->
+    lists:member(Key, ReservedKeys).
+
+trie_reserved_keys() ->
+    {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, #{}),
+    maps:get(reserved, Trie:info(), []).
 
 is_reserved_custom_key(Key, List) when is_binary(Key), is_list(List) ->
     lists:member(Key, List);

@@ -11,7 +11,7 @@
 -include_lib("hb/include/hb.hrl").
 
 -implements(<<"token@1.0">>).
--device_libraries([lib_process, lib_process_outbox, lib_trie]).
+-device_libraries([lib_process, lib_process_outbox]).
 
 %% @doc `Action' values that should be handled by the `mint-device'.
 -define(MINT_ACTIONS,
@@ -110,7 +110,7 @@ canonicalize_balances(Base, Balances, Opts) ->
                 }
             end,
             {false, #{}},
-            lib_trie:keys(Balances, Opts)
+            trie_keys(Balances, Opts)
         ),
     case Changed of
         false ->
@@ -194,7 +194,7 @@ handle_action(Action, Base, Req, Opts) ->
 balance(Base, Req, Opts) ->
     maybe
         {ok, Account0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
-        true ?= validate_address(Account0, []),
+        true ?= validate_address(Account0, [], Opts),
         Account = account_key(Account0),
         ?event(
             debug_token,
@@ -243,8 +243,8 @@ transfer(Base, Assignment, Opts) ->
         {ok, Recipient0} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
         {ok, Quantity} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
         % validate From/Recipient sanity
-        true ?= validate_address(From0, []),
-        true ?= validate_address(Recipient0, []),
+        true ?= validate_address(From0, [], Opts),
+        true ?= validate_address(Recipient0, [], Opts),
         From = account_key(From0),
         Recipient = account_key(Recipient0),
         % Normalize the base's minting state for the sender.
@@ -351,7 +351,7 @@ mint(Base, Assignment, Opts) ->
                     as_mint_device(<<"mint">>, Base, Assignment, Opts);
                 {ok, Subject} ->
                     maybe
-                        true ?= validate_address(Subject, []),
+                        true ?= validate_address(Subject, [], Opts),
                         MintReq1 =
                             hb_ao:set(
                                 Assignment,
@@ -495,7 +495,7 @@ enforce_set_authority(Base, Req, Opts) ->
     end.
 
 enforce_legacy_set_authority(Setter, Base, Opts) ->
-    case validate_address(Setter, []) of
+    case validate_address(Setter, [], Opts) of
         true ->
             SetAuthority = hb_ao:get(<<"set-authority">>, Base, Opts),
             case SetAuthority of
@@ -517,8 +517,11 @@ enforce_legacy_set_authority(Setter, Base, Opts) ->
 
 %% @doc Validate address format for security. the validation
 %% allows binary addresses up to 128 bytes and prevent invalid
-%% addresses such as lib_trie reserved keys.
-validate_address(Address, CustomList) when is_binary(Address), is_list(CustomList) ->
+%% addresses such as trie reserved keys.
+validate_address(Address, CustomList) ->
+    validate_address(Address, CustomList, #{}).
+
+validate_address(Address, CustomList, Opts) when is_binary(Address), is_list(CustomList) ->
     ReservedKeys = ?AO_RESERVED_ADDRESS_KEYS ++ CustomList,
     AccountKey = account_key(Address),
     CanonicalReservedKeys = [account_key(Key) || Key <- ReservedKeys, is_binary(Key)],
@@ -526,10 +529,11 @@ validate_address(Address, CustomList) when is_binary(Address), is_list(CustomLis
         0 -> {error, <<"Address cannot be empty.">>};
         N when N > 128 -> {error, <<"Address is too long.">>};
         _ ->
+            TrieReservedKeys = trie_reserved_keys(Opts),
             maybe
-                true ?= (not lib_trie:is_reserved_key(Address))
+                true ?= (not is_reserved_trie_key(Address, TrieReservedKeys))
                     orelse {error, <<"Address uses a reserved trie internal key.">>},
-                true ?= (not lib_trie:is_reserved_key(AccountKey))
+                true ?= (not is_reserved_trie_key(AccountKey, TrieReservedKeys))
                     orelse {error, <<"Address uses a reserved trie internal key.">>},
                 true ?= (not is_reserved_custom_key(Address, ReservedKeys))
                     orelse {error, <<"Address is a reserved ao/custom key">>},
@@ -542,11 +546,22 @@ validate_address(Address, CustomList) when is_binary(Address), is_list(CustomLis
                 end
             end
     end;
-validate_address(_, _) ->
+validate_address(_, _, _) ->
     {error, <<"Address must be a binary.">>}.
 
 account_key(Address) when is_binary(Address) ->
     hb_util:to_lower(Address).
+
+trie_keys(Balances, Opts) ->
+    {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
+    Trie:keys(Balances, Opts).
+
+is_reserved_trie_key(Key, ReservedKeys) ->
+    lists:member(Key, ReservedKeys).
+
+trie_reserved_keys(Opts) ->
+    {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
+    maps:get(reserved, Trie:info(), []).
 
 add_balance(Account, Amount, Balances) ->
     Balances#{ Account => maps:get(Account, Balances, 0) + Amount }.
