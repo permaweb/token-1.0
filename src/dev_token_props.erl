@@ -212,7 +212,7 @@ generate_sim_request(_State, Opts) ->
                     <<"action">> => <<"Transfer">>,
                     <<"recipient">> => hb_util:human_id(RecipientWallet),
                     <<"quantity">> => Amount,
-                    <<"target">> => lib_process:process_id(Proc, #{}, SystemOpts)
+                    <<"target">> => process_id(Proc, #{}, SystemOpts)
                 },
                 UserOpts
             ),
@@ -236,8 +236,7 @@ generate_sim_request(_State, Opts) ->
                         <<"intent">> =>
                             #{
                                 <<"action">> => <<"transfer">>,
-                                <<"ledger">> =>
-                                    lib_process:process_id(Proc, #{}, ExecOpts),
+                                <<"ledger">> => process_id(Proc, #{}, ExecOpts),
                                 <<"sender">> => hb_util:human_id(SenderWallet),
                                 <<"recipient">> =>
                                     hb_util:human_id(RecipientWallet),
@@ -249,6 +248,31 @@ generate_sim_request(_State, Opts) ->
             {error, Reason} ->
                 {error, Reason}
         end
+    end.
+
+process_id(Process, Req, Opts) ->
+    ProcMsg =
+        case hb_ao:get(<<"process">>, Process, Opts#{ <<"hashpath">> => ignore }) of
+            not_found ->
+                {ok, Committed} = hb_message:with_only_committed(Process, Opts),
+                Committed;
+            Committed ->
+                Committed
+        end,
+    Signers = hb_message:signers(ProcMsg, Opts),
+    case {hb_message:verify(ProcMsg, all, Opts), Signers} of
+        {false, _} ->
+            ?event({process_not_verified, {process, ProcMsg}}),
+            throw({process_not_verified, ProcMsg});
+        {true, []} ->
+            ?event({process_has_no_signers, {process, ProcMsg}}),
+            throw({process_has_no_signers, ProcMsg});
+        {true, _} ->
+            hb_message:id(
+                ProcMsg,
+                hb_util:atom(maps:get(<<"commitments">>, Req, <<"signed">>)),
+                Opts
+            )
     end.
 
 verify_net_balance_unchanged(OldState, _Req, NewState, Opts) ->

@@ -8,12 +8,17 @@
 -module(dev_security).
 -include_lib("hb/include/hb.hrl").
 -implements(<<"security@1.0">>).
--device_libraries([lib_process]).
 -include_lib("eunit/include/eunit.hrl").
 %%% Device API.
--export([compute/3]).
+-export([info/0, compute/3]).
 %%% Public utility API.
 -export([validate/4, validate/5]).
+
+%% @doc Return the public security device API.
+info() ->
+    #{
+        exports => [<<"compute">>]
+    }.
 
 %% @doc Compute the security-normalized request.
 compute(Base, Req, Opts) ->
@@ -26,7 +31,6 @@ compute(Base, Req, Opts) ->
             ?event(
                 security_error,
                 {security_error,
-                    {process, lib_process:process_id(Base, #{}, Opts)},
                     {slot, hb_maps:get(<<"slot">>, Req, no_slot, Opts)},
                     {reason, Reason}
                 },

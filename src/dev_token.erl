@@ -1,17 +1,17 @@
 %%% @doc A fast, simple implementation of AO token specification.
 %%% Specification: https://cookbook_ao.arweave.net/references/api/token.html
 -module(dev_token).
--export([compute/3, init/3, normalize/3, snapshot/3, balance/3, mint/3]).
+-export([info/0, compute/3, init/3, normalize/3, snapshot/3, balance/3, mint/3]).
 %%% Non-public device API functions. Note: Ensure that these are not exported
-%%% as publicly callable device keys, either by having arity >= 3, or explicitly
-%%% excluding in an `info/1` response.
+%%% as publicly callable device keys, either by having arity > 3, or by gating
+%%% the public surface in `info/0`.
 -export([handle_action/4]).
 %%% Public helpers.
 -export([validate_address/2]).
 -include_lib("hb/include/hb.hrl").
 
 -implements(<<"token@1.0">>).
--device_libraries([lib_process, lib_process_outbox]).
+-device_libraries([lib_process_outbox]).
 
 %% @doc `Action' values that should be handled by the `mint-device'.
 -define(MINT_ACTIONS,
@@ -71,6 +71,20 @@ whitelisted_auth_fields(Base, Opts) ->
 end.
 
 %%% `~process@1.0' interface implementation.
+
+%% @doc Return the public token device API.
+info() ->
+    #{
+        exports =>
+            [
+                <<"compute">>,
+                <<"init">>,
+                <<"normalize">>,
+                <<"snapshot">>,
+                <<"balance">>,
+                <<"mint">>
+            ]
+    }.
 
 %% @doc Canonicalize account keys in the initial balance trie.
 init(Base, _Req, Opts) ->
@@ -171,7 +185,13 @@ restore_device(Device, Base, Opts) ->
 
 %% @doc Enforce the security constraints of the base state upon the request.
 enforce_security(Base, Req, Opts) ->
-    case lib_process:run_as(<<"security">>, Base, Req, Opts) of
+    SecurityDevice = hb_maps:get(
+        <<"security-device">>,
+        Base,
+        <<"security@1.0">>,
+        Opts
+    ),
+    case run_as_device(<<"security">>, SecurityDevice, Base, Req, Opts) of
         {ok, SecureReq} -> {ok, SecureReq};
         {skip, Reason} -> {error, Reason}
     end.
@@ -179,8 +199,7 @@ enforce_security(Base, Req, Opts) ->
 %% @doc Route the request to the appropriate key resolution function, depending
 %% upon the `action' specified.
 handle_action(Action, Base, Req, Opts) ->
-    Self = lib_process:process_id(Base, #{}, Opts),
-    ?event(token_short, {token, {id, Self}, {action, Action}}, Opts),
+    ?event(token_short, {token_action, Action}, Opts),
     case hb_util:to_lower(hb_ao:normalize_key(Action)) of
         <<"transfer">> -> transfer(Base, Req, Opts);
         <<"set">> -> secure_set(Base, Req, Opts);
@@ -398,9 +417,12 @@ action_as_mint_device(Action, Base, Req, Opts) ->
 
 %% @doc Run a given `path' on the mint device.
 as_mint_device(Path, Base, Req, Opts) ->
-    lib_process:run_as(
+    MintBase = ensure_mint_device(Base, Opts),
+    MintDevice = hb_ao:get(<<"mint-device">>, MintBase, Opts),
+    run_as_device(
         <<"mint">>,
-        ensure_mint_device(Base, Opts),
+        MintDevice,
+        MintBase,
         Req#{ <<"path">> => Path },
         Opts
     ).
@@ -575,6 +597,52 @@ is_reserved_custom_key(_, _) ->
 security_validate(Key, Base, SubjectMsg, From, Opts) ->
     {ok, Security} = hb_device_load:reference(<<"security@1.0">>, Opts),
     Security:validate(Key, Base, SubjectMsg, From, Opts).
+
+run_as_device(Key, Device, Base, Path, Opts) when not is_map(Path) ->
+    run_as_device(Key, Device, Base, #{ <<"path">> => Path }, Opts);
+run_as_device(Key, Device, Base, Req, Opts) ->
+    BaseDevice = hb_maps:get(<<"device">>, Base, not_found, Opts),
+    {ok, PreparedMsg} =
+        hb_ao:resolve(
+            ensure_process_key(Base, Opts),
+            #{
+                <<"path">> => <<"set">>,
+                <<"device">> => Device,
+                <<"input-prefix">> =>
+                    case hb_maps:get(<<"input-prefix">>, Base, not_found, Opts) of
+                        not_found -> <<"process">>;
+                        Prefix -> Prefix
+                    end,
+                <<"output-prefixes">> =>
+                    hb_maps:get(
+                        <<Key/binary, "-output-prefixes">>,
+                        Base,
+                        undefined,
+                        Opts
+                    )
+            },
+            Opts
+        ),
+    {Status, BaseResult} = hb_ao:resolve(PreparedMsg, Req, Opts),
+    case {Status, BaseResult} of
+        {ok, #{ <<"device">> := Device }} ->
+            {ok, hb_ao:set(BaseResult, #{ <<"device">> => BaseDevice }, Opts)};
+        _ ->
+            {Status, BaseResult}
+    end.
+
+ensure_process_key(Base, Opts) ->
+    case hb_maps:get(<<"process">>, Base, not_found, Opts) of
+        not_found ->
+            {ok, Committed} = hb_message:with_only_committed(Base, Opts),
+            hb_ao:set(
+                hb_message:uncommitted(Base, Opts),
+                #{ <<"process">> => Committed },
+                Opts#{ <<"hashpath">> => ignore }
+            );
+        _ ->
+            Base
+    end.
 
 send_error(Base, Assignment, Reason, Opts) when is_atom(Reason) ->
     send_error(Base, Assignment, atom_to_binary(Reason), Opts);

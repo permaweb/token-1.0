@@ -59,7 +59,7 @@ token_state(Params, Opts) ->
             },
             Extra
         ),
-    lib_process:ensure_process_key(hb_message:commit(Base, Opts), Opts).
+    hb_message:commit(Base, Opts).
 
 balance(State, Account, Opts) ->
     Balances = hb_ao:get(<<"balances">>, State, Opts),
@@ -149,18 +149,15 @@ init_canonicalizes_raw_initial_balances_test() ->
             Opts
         ),
     Base =
-        lib_process:ensure_process_key(
-            hb_message:commit(
-                #{
-                    <<"device">> => <<"token@1.0">>,
-                    <<"name">> => <<"Test Token">>,
-                    <<"ticker">> => <<"TEST">>,
-                    <<"denomination">> => 0,
-                    <<"total-supply">> => 7,
-                    <<"balances">> => RawBalances
-                },
-                Opts
-            ),
+        hb_message:commit(
+            #{
+                <<"device">> => <<"token@1.0">>,
+                <<"name">> => <<"Test Token">>,
+                <<"ticker">> => <<"TEST">>,
+                <<"denomination">> => 0,
+                <<"total-supply">> => 7,
+                <<"balances">> => RawBalances
+            },
             Opts
         ),
     {ok, Initialized} = dev_token:init(Base, #{}, Opts),

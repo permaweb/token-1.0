@@ -150,11 +150,9 @@ manage_subscription(State, Req, SubscriptionInfo, Opts) ->
                 <<"No security-normalized `from' key found in request.">>,
                 Opts
             ),
-        ProcessID = lib_process:process_id(State, #{}, Opts),
         ?event(
             subscriptions_short,
             {set_subscription_info,
-                {process_id, ProcessID},
                 {action, Action},
                 {subject, Subject},
                 {listener, Listener},
@@ -177,7 +175,6 @@ manage_subscription(State, Req, SubscriptionInfo, Opts) ->
         ?event(
             debug_subscriptions,
             {setting_subscription,
-                {process_id, ProcessID},
                 {action, Action},
                 {subject, Subject},
                 {listener, Listener},
@@ -193,7 +190,6 @@ manage_subscription(State, Req, SubscriptionInfo, Opts) ->
             ?event(
                 debug_subscriptions,
                 {error_setting_subscription,
-                    {process_id, lib_process:process_id(State, #{}, Opts)},
                     {state, State},
                     {request, Req},
                     {reason, Reason}

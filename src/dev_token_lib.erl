@@ -173,7 +173,7 @@ push(Process, Msg, MsgWallet, RawOpts) ->
                                 if is_binary(Process) ->
                                     Process;
                                 true ->
-                                    lib_process:process_id(Process, #{}, SystemOpts)
+                                    process_id(Process, #{}, SystemOpts)
                                 end
                         },
                         UserOpts
@@ -182,6 +182,31 @@ push(Process, Msg, MsgWallet, RawOpts) ->
             UserOpts
         ),
     hb_ao:resolve(Process, Req, SystemOpts).
+
+process_id(Process, Req, Opts) ->
+    ProcMsg =
+        case hb_ao:get(<<"process">>, Process, Opts#{ <<"hashpath">> => ignore }) of
+            not_found ->
+                {ok, Committed} = hb_message:with_only_committed(Process, Opts),
+                Committed;
+            Committed ->
+                Committed
+        end,
+    Signers = hb_message:signers(ProcMsg, Opts),
+    case {hb_message:verify(ProcMsg, all, Opts), Signers} of
+        {false, _} ->
+            ?event({process_not_verified, {process, ProcMsg}}),
+            throw({process_not_verified, ProcMsg});
+        {true, []} ->
+            ?event({process_has_no_signers, {process, ProcMsg}}),
+            throw({process_has_no_signers, ProcMsg});
+        {true, _} ->
+            hb_message:id(
+                ProcMsg,
+                hb_util:atom(maps:get(<<"commitments">>, Req, <<"signed">>)),
+                Opts
+            )
+    end.
 
 %% @doc Retreive a single balance from the ledger.
 balance(ProcMsg, User, Opts) when not ?IS_ID(User) ->
