@@ -11,7 +11,8 @@
 -include_lib("hb/include/hb.hrl").
 
 -implements(<<"token@1.0">>).
--device_libraries([lib_process_outbox]).
+
+-define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
 
 %% @doc `Action' values that should be handled by the `mint-device'.
 -define(MINT_ACTIONS,
@@ -203,8 +204,8 @@ handle_action(Action, Base, Req, Opts) ->
     case hb_util:to_lower(hb_ao:normalize_key(Action)) of
         <<"transfer">> -> transfer(Base, Req, Opts);
         <<"set">> -> secure_set(Base, Req, Opts);
-        <<"subscribe">> -> lib_process_outbox:subscribe(Base, Req, Opts);
-        <<"unsubscribe">> -> lib_process_outbox:unsubscribe(Base, Req, Opts);
+        <<"subscribe">> -> outbox_subscribe(Base, Req, Opts);
+        <<"unsubscribe">> -> outbox_unsubscribe(Base, Req, Opts);
         MintDevAction -> action_as_mint_device(MintDevAction, Base, Req, Opts)
     end.
 
@@ -315,7 +316,7 @@ transfer(Base, Assignment, Opts) ->
                     hb_maps:put(<<"balances">>, NewBalances, NormBase, Opts)
             end,
         % Send transfer notices.
-        WithNotices = lib_process_outbox:send(
+        {ok, WithNotices} ?= outbox_send(
             transfer_notices(From0, Recipient0, Quantity, Req, Opts),
             NewBaseAfterTransfer,
             Opts
@@ -336,7 +337,7 @@ transfer(Base, Assignment, Opts) ->
 
 transfer_notices(From, Recipient, Quantity, Req, Opts) ->
     % Extract forwarded keys (X- prefixed fields from request)
-    ForwardedKeys = lib_process_outbox:forwarded_keys(Req, Opts),
+    ForwardedKeys = forwarded_keys(Req, Opts),
     DebitNotice =
         ForwardedKeys#{
             <<"action">> => <<"Debit-Notice">>,
@@ -594,6 +595,46 @@ is_reserved_custom_key(Key, List) when is_binary(Key), is_list(List) ->
 is_reserved_custom_key(_, _) -> 
     false.
 
+outbox_send(Messages, Base, Opts) ->
+    maybe
+        {ok, Outbox} ?= process_outbox(Opts),
+        Outbox:send(
+            Base,
+            #{ <<"messages">> => Messages },
+            Opts
+        )
+    end.
+
+outbox_subscribe(Base, Req, Opts) ->
+    maybe
+        {ok, Outbox} ?= process_outbox(Opts),
+        Outbox:subscribe(Base, Req, Opts)
+    end.
+
+outbox_unsubscribe(Base, Req, Opts) ->
+    maybe
+        {ok, Outbox} ?= process_outbox(Opts),
+        Outbox:unsubscribe(Base, Req, Opts)
+    end.
+
+process_outbox(Opts) ->
+    case hb_device_load:reference(?PROCESS_OUTBOX_DEVICE, Opts) of
+        {ok, Outbox} ->
+            {ok, Outbox};
+        {error, Reason} ->
+            {error, {process_outbox_not_loadable, Reason}}
+    end.
+
+forwarded_keys(Req, Opts) ->
+    hb_maps:filter(
+        fun(Key, _Value) ->
+            KeyBin = hb_util:to_lower(hb_util:bin(Key)),
+            binary:match(KeyBin, <<"x-">>) =:= {0, 2}
+        end,
+        Req,
+        Opts
+    ).
+
 security_validate(Key, Base, SubjectMsg, From, Opts) ->
     {ok, Security} = hb_device_load:reference(<<"security@1.0">>, Opts),
     Security:validate(Key, Base, SubjectMsg, From, Opts).
@@ -659,14 +700,12 @@ send_error(Base, Assignment, Reason, Opts) when is_binary(Reason) ->
             ?event(token_short, {skipping_error_report, Error}, Opts),
             {ok, Base};
         {ok, Target} ->
-            {ok,
-                lib_process_outbox:send(
-                    #{
-                        <<"target">> => Target,       
-                        <<"reason">> => Reason
-                    },
-                    Base,
-                    Opts
-                )
-            }
+            outbox_send(
+                #{
+                    <<"target">> => Target,
+                    <<"reason">> => Reason
+                },
+                Base,
+                Opts
+            )
     end.

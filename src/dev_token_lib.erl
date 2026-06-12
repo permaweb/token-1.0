@@ -6,6 +6,8 @@
 -module(dev_token_lib).
 -include_lib("hb/include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
+
+-define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
 %%% Initialization and Push wrappers.
 -export([ledger/1, ledger/2, transfer/5, transfer/6]).
 -export([subledger/2, subledger/3]).
@@ -318,7 +320,14 @@ subscribers(ProcMsg, Action, Opts) ->
         Opts
     ).
 subscribers(ProcMsg, Action, Target, Opts) ->
-    lib_process_outbox:subscribers(now(ProcMsg, Opts), Action, Target, Opts).
+    {ok, Outbox} = hb_device_load:reference(?PROCESS_OUTBOX_DEVICE, Opts),
+    {ok, Subscribers} =
+        Outbox:subscribers(
+            now(ProcMsg, Opts),
+            #{ <<"action">> => Action, <<"target">> => Target },
+            Opts
+        ),
+    Subscribers.
 
 %% @doc Generate a complete overview of the test environment's balances and 
 %% ledgers. Optionally, a map of environment names can be provided to make the

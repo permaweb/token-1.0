@@ -10,13 +10,19 @@
 -define(MAX_TRANSFER_AMOUNT, 1_000_000_000_000_000_000 div 5).
 -define(NODE_WALLET_CACHE_KEY, {?MODULE, node_wallet}).
 -define(IDENTITIES_CACHE_KEY, {?MODULE, identities}).
+-define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
+-define(PROCESS_OUTBOX_IMPL, <<"IgFctN6dNiwIoQrONi__4trJ70bkamBXXp9ipyW3SQI">>).
 
 opts() ->
     hb:init(),
     #{
         <<"load-remote-devices">> => false,
-        <<"store">> => [hb_test_utils:test_store()]
+        <<"trusted-devices">> => #{?PROCESS_OUTBOX_DEVICE => ?PROCESS_OUTBOX_IMPL},
+        <<"store">> => [hb_test_utils:test_store() | default_stores()]
     }.
+
+default_stores() ->
+    hb_opts:get(store, [], hb_opts:default_message()).
 
 simulate_native_token_test_() ->
     {timeout, 120, fun simulate_native_token/0}.

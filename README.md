@@ -26,8 +26,13 @@ rebar3 eunit-all
 ## Local Node
 
 ```sh
-rebar3 device local
+HB_CONFIG=config.json rebar3 device local
 ```
+
+`config.json` pins the published `process-outbox@1.0` implementation through
+HyperBEAM's `trusted-devices` runtime map.
+
+src: https://github.com/permaweb/process-outbox
 
 ## Publish
 

@@ -3,13 +3,20 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("hb/include/hb.hrl").
 
+-define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
+-define(PROCESS_OUTBOX_IMPL, <<"IgFctN6dNiwIoQrONi__4trJ70bkamBXXp9ipyW3SQI">>).
+
 opts() ->
     hb:init(),
     #{
         <<"load-remote-devices">> => false,
+        <<"trusted-devices">> => #{?PROCESS_OUTBOX_DEVICE => ?PROCESS_OUTBOX_IMPL},
         <<"priv-wallet">> => ar_wallet:new(),
-        <<"store">> => [hb_test_utils:test_store()]
+        <<"store">> => [hb_test_utils:test_store() | default_stores()]
     }.
+
+default_stores() ->
+    hb_opts:get(store, [], hb_opts:default_message()).
 
 id(Bin) when is_binary(Bin) ->
     BitSize = byte_size(Bin) * 8,
@@ -75,6 +82,69 @@ outbox(State, Opts) ->
     hb_util:message_to_ordered_list(
         hb_ao:get(<<"results/outbox">>, State, [], Opts),
         Opts
+    ).
+
+process_outbox(Opts) ->
+    {ok, Outbox} = hb_device_load:reference(?PROCESS_OUTBOX_DEVICE, Opts),
+    Outbox.
+
+outbox_subscribe(State, Req, Opts) ->
+    (process_outbox(Opts)):subscribe(State, Req, Opts).
+
+outbox_unsubscribe(State, Req, Opts) ->
+    (process_outbox(Opts)):unsubscribe(State, Req, Opts).
+
+outbox_subscribers(State, Action, Opts) ->
+    outbox_subscribers(State, Action, <<"broadcast">>, Opts).
+outbox_subscribers(State, Action, Target, Opts) ->
+    {ok, Subscribers} =
+        (process_outbox(Opts)):subscribers(
+            State,
+            #{ <<"action">> => Action, <<"target">> => Target },
+            Opts
+        ),
+    Subscribers.
+
+outbox_send(Message, State, Opts) ->
+    {ok, Updated} =
+        (process_outbox(Opts)):send(
+            State,
+            #{ <<"messages">> => Message },
+            Opts
+        ),
+    Updated.
+
+subscription_req(Action, default, Listener, Slot) ->
+    #{
+        <<"slot">> => Slot,
+        <<"body">> =>
+            #{
+                <<"subscribe-action">> => Action,
+                <<"from">> => Listener
+            }
+    };
+subscription_req(Action, Target, Listener, Slot) ->
+    #{
+        <<"slot">> => Slot,
+        <<"body">> =>
+            #{
+                <<"subscribe-action">> => Action,
+                <<"subscribe-target">> => Target,
+                <<"from">> => Listener
+            }
+    }.
+
+has_message(Pairs, Msgs, Opts) ->
+    lists:any(
+        fun(Msg) ->
+            lists:all(
+                fun({Key, Value}) ->
+                    hb_ao:get(Key, Msg, undefined, Opts) =:= Value
+                end,
+                Pairs
+            )
+        end,
+        Msgs
     ).
 
 transfer(State, From, To, Quantity, Opts) ->
@@ -257,6 +327,123 @@ mixed_case_transfer_updates_canonical_balances_test() ->
     ?assertEqual(Alice, hb_ao:get(<<"target">>, Debit, Opts)),
     ?assertEqual(Bob, hb_ao:get(<<"target">>, Credit, Opts)),
     ?assertEqual(Alice, hb_ao:get(<<"sender">>, Credit, Opts)).
+
+outbox_default_broadcast_subscription_test() ->
+    Opts = opts(),
+    {ok, Subscribed} =
+        outbox_subscribe(
+            #{},
+            subscription_req(<<"Ping">>, default, <<"listener-a">>, 11),
+            Opts
+        ),
+    ?assertEqual(
+        [<<"listener-a">>],
+        outbox_subscribers(Subscribed, <<"Ping">>, Opts)
+    ),
+    Updated =
+        outbox_send(
+            #{ <<"action">> => <<"Ping">> },
+            Subscribed,
+            Opts
+        ),
+    Notices = outbox(Updated, Opts),
+    ?assertEqual(2, length(Notices)),
+    ?assert(has_message(
+        [
+            {<<"action">>, <<"notify">>},
+            {<<"target">>, <<"listener-a">>},
+            {<<"x-action">>, <<"Ping">>}
+        ],
+        Notices,
+        Opts
+    )).
+
+outbox_targeted_subscriptions_do_not_overwrite_test() ->
+    Opts = opts(),
+    {ok, AliceSubscribed} =
+        outbox_subscribe(
+            #{},
+            subscription_req(<<"Debit-Notice">>, <<"alice">>, <<"listener-a">>, 21),
+            Opts
+        ),
+    {ok, BothSubscribed} =
+        outbox_subscribe(
+            AliceSubscribed,
+            subscription_req(<<"Debit-Notice">>, <<"bob">>, <<"listener-b">>, 22),
+            Opts
+        ),
+    ?assertEqual(
+        [<<"listener-a">>],
+        outbox_subscribers(
+            BothSubscribed,
+            <<"Debit-Notice">>,
+            <<"alice">>,
+            Opts
+        )
+    ),
+    ?assertEqual(
+        [<<"listener-b">>],
+        outbox_subscribers(
+            BothSubscribed,
+            <<"Debit-Notice">>,
+            <<"bob">>,
+            Opts
+        )
+    ),
+    Updated =
+        outbox_send(
+            #{
+                <<"action">> => <<"Debit-Notice">>,
+                <<"target">> => <<"alice">>,
+                <<"quantity">> => 5
+            },
+            BothSubscribed,
+            Opts
+        ),
+    Notices = outbox(Updated, Opts),
+    ?assert(has_message(
+        [
+            {<<"action">>, <<"notify">>},
+            {<<"target">>, <<"listener-a">>},
+            {<<"x-target">>, <<"alice">>},
+            {<<"x-quantity">>, 5}
+        ],
+        Notices,
+        Opts
+    )),
+    ?assertNot(has_message(
+        [
+            {<<"action">>, <<"notify">>},
+            {<<"target">>, <<"listener-b">>}
+        ],
+        Notices,
+        Opts
+    )).
+
+outbox_unsubscribe_removes_listener_test() ->
+    Opts = opts(),
+    Req = subscription_req(<<"Debit-Notice">>, <<"alice">>, <<"listener-a">>, 31),
+    {ok, Subscribed} = outbox_subscribe(#{}, Req, Opts),
+    {ok, Unsubscribed} = outbox_unsubscribe(Subscribed, Req, Opts),
+    ?assertEqual(
+        [],
+        outbox_subscribers(
+            Unsubscribed,
+            <<"Debit-Notice">>,
+            <<"alice">>,
+            Opts
+        )
+    ),
+    Updated =
+        outbox_send(
+            #{
+                <<"action">> => <<"Debit-Notice">>,
+                <<"target">> => <<"alice">>
+            },
+            Unsubscribed,
+            Opts
+        ),
+    ?assertEqual(1, length(outbox(Updated, Opts))).
 
 fixed_supply_transfer_test() ->
     Opts = opts(),
