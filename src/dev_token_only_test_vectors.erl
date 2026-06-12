@@ -5,12 +5,17 @@
 
 -define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
 -define(PROCESS_OUTBOX_IMPL, <<"IgFctN6dNiwIoQrONi__4trJ70bkamBXXp9ipyW3SQI">>).
+-define(SECURITY_DEVICE, <<"security@1.0">>).
+-define(SECURITY_IMPL, <<"QgWaA7PRbdXHnqHWpZPegRzasLsUG_hsTry_-hht1zA">>).
 
 opts() ->
     hb:init(),
     #{
         <<"load-remote-devices">> => false,
-        <<"trusted-devices">> => #{?PROCESS_OUTBOX_DEVICE => ?PROCESS_OUTBOX_IMPL},
+        <<"trusted-devices">> => #{
+            ?PROCESS_OUTBOX_DEVICE => ?PROCESS_OUTBOX_IMPL,
+            ?SECURITY_DEVICE => ?SECURITY_IMPL
+        },
         <<"priv-wallet">> => ar_wallet:new(),
         <<"store">> => [hb_test_utils:test_store() | default_stores()]
     }.

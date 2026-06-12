@@ -486,7 +486,7 @@ enforce_whitelisted_fields(Base, Req, Opts) ->
 
 %% @doc Enforce that the caller is the `set` authority. If `Base` configures
 %% either `set-authority-required` or `set-authority-match`, this function
-%% delegates authorization to `dev_security:validate/5` for `set-authority`.
+%% delegates authorization to the configured security device for `set-authority`.
 %% Otherwise it falls back to legacy exact-match semantics:
 %% `Req/from =:= Base/set-authority`.
 enforce_set_authority(Base, Req, Opts) ->
@@ -636,8 +636,24 @@ forwarded_keys(Req, Opts) ->
     ).
 
 security_validate(Key, Base, SubjectMsg, From, Opts) ->
-    {ok, Security} = hb_device_load:reference(<<"security@1.0">>, Opts),
-    Security:validate(Key, Base, SubjectMsg, From, Opts).
+    SecurityDevice = hb_maps:get(
+        <<"security-device">>,
+        Base,
+        <<"security@1.0">>,
+        Opts
+    ),
+    ValidateReq = #{
+        <<"path">> => <<"validate">>,
+        <<"key">> => Key,
+        <<"subject">> => SubjectMsg,
+        <<"from">> => From
+    },
+    case run_as_device(<<"security">>, SecurityDevice, Base, ValidateReq, Opts) of
+        {ok, true} -> true;
+        {error, Reason} -> {error, Reason};
+        {skip, Reason} -> {error, Reason};
+        Other -> {error, {security_validate_unexpected_result, Other}}
+    end.
 
 run_as_device(Key, Device, Base, Path, Opts) when not is_map(Path) ->
     run_as_device(Key, Device, Base, #{ <<"path">> => Path }, Opts);
