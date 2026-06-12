@@ -13,7 +13,7 @@
 -define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
 -define(PROCESS_OUTBOX_IMPL, <<"IgFctN6dNiwIoQrONi__4trJ70bkamBXXp9ipyW3SQI">>).
 -define(SECURITY_DEVICE, <<"security@1.0">>).
--define(SECURITY_IMPL, <<"QgWaA7PRbdXHnqHWpZPegRzasLsUG_hsTry_-hht1zA">>).
+-define(SECURITY_IMPL, <<"t0UTvqWtUT2ohVw-bWPdnjbVCL2tPLFFmJAqBiFWmeY">>).
 
 opts() ->
     hb:init(),
