@@ -1,5 +1,5 @@
 %%% @doc Token-only tests for fixed-supply ownership ledgers.
--module(dev_token_only_test_vectors).
+-module(hb_token_test_vectors).
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("hb/include/hb.hrl").
 

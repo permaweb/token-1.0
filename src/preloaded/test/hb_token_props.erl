@@ -1,5 +1,5 @@
 %%% @doc Native token process invariant tests.
--module(dev_token_props).
+-module(hb_token_props).
 -include_lib("hb/include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -export([opts/0]).
