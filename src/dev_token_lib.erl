@@ -6,6 +6,8 @@
 -module(dev_token_lib).
 -include_lib("hb/include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
+
+-define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
 %%% Initialization and Push wrappers.
 -export([ledger/1, ledger/2, transfer/5, transfer/6]).
 -export([subledger/2, subledger/3]).
@@ -34,25 +36,7 @@ ledger(Extra, Opts) ->
             undefined -> Extra;
             RawBalance ->
                 Extra#{
-                    <<"balances">> =>
-                        maps:from_list(
-                            lists:filtermap(
-                                fun({ID, Amount}) when ?IS_ID(ID) ->
-                                    {true, {hb_util:human_id(ID), Amount}};
-                                ({Wallet, Amount}) when is_tuple(Wallet) ->
-                                    {
-                                        true,
-                                        {
-                                            hb_util:human_id(Wallet),
-                                            Amount
-                                        }
-                                    };
-                                (_Other) ->
-                                    false
-                                end,
-                                maps:to_list(RawBalance)
-                            )
-                        )
+                    <<"balances">> => canonical_balances(RawBalance)
                 }
         end,
     ?event(debug_test, {mod_extra, ModExtra}),
@@ -191,7 +175,7 @@ push(Process, Msg, MsgWallet, RawOpts) ->
                                 if is_binary(Process) ->
                                     Process;
                                 true ->
-                                    lib_process:process_id(Process, #{}, SystemOpts)
+                                    process_id(Process, #{}, SystemOpts)
                                 end
                         },
                         UserOpts
@@ -201,11 +185,40 @@ push(Process, Msg, MsgWallet, RawOpts) ->
         ),
     hb_ao:resolve(Process, Req, SystemOpts).
 
+process_id(Process, Req, Opts) ->
+    ProcMsg =
+        case hb_ao:get(<<"process">>, Process, Opts#{ <<"hashpath">> => ignore }) of
+            not_found ->
+                {ok, Committed} = hb_message:with_only_committed(Process, Opts),
+                Committed;
+            Committed ->
+                Committed
+        end,
+    Signers = hb_message:signers(ProcMsg, Opts),
+    case {hb_message:verify(ProcMsg, all, Opts), Signers} of
+        {false, _} ->
+            ?event({process_not_verified, {process, ProcMsg}}),
+            throw({process_not_verified, ProcMsg});
+        {true, []} ->
+            ?event({process_has_no_signers, {process, ProcMsg}}),
+            throw({process_has_no_signers, ProcMsg});
+        {true, _} ->
+            hb_message:id(
+                ProcMsg,
+                hb_util:atom(maps:get(<<"commitments">>, Req, <<"signed">>)),
+                Opts
+            )
+    end.
+
 %% @doc Retreive a single balance from the ledger.
 balance(ProcMsg, User, Opts) when not ?IS_ID(User) ->
     balance(ProcMsg, hb_util:human_id(ar_wallet:to_address(User)), Opts);
 balance(ProcMsg, ID, Opts) ->
-    hb_ao:get(<<"now/balances/", ID/binary>>, ProcMsg, 0, Opts).
+    Account = account_key(ID),
+    case hb_ao:get(<<"now/balances/", Account/binary>>, ProcMsg, not_found, Opts) of
+        not_found -> hb_ao:get(<<"now/balances/", ID/binary>>, ProcMsg, 0, Opts);
+        Balance -> Balance
+    end.
 
 %% @doc Retrieve a single balance through the execution device's `balance`
 %% path, allowing lazy mint devices to normalize account state first.
@@ -307,7 +320,14 @@ subscribers(ProcMsg, Action, Opts) ->
         Opts
     ).
 subscribers(ProcMsg, Action, Target, Opts) ->
-    lib_process_outbox:subscribers(now(ProcMsg, Opts), Action, Target, Opts).
+    {ok, Outbox} = hb_device_load:reference(?PROCESS_OUTBOX_DEVICE, Opts),
+    {ok, Subscribers} =
+        Outbox:subscribers(
+            now(ProcMsg, Opts),
+            #{ <<"action">> => Action, <<"target">> => Target },
+            Opts
+        ),
+    Subscribers.
 
 %% @doc Generate a complete overview of the test environment's balances and 
 %% ledgers. Optionally, a map of environment names can be provided to make the
@@ -467,3 +487,23 @@ normalize_env(Procs) when is_list(Procs) ->
 %% @doc Return the normalized environment without the root ledger.
 normalize_without_root(RootProc, Procs) ->
     maps:without([hb_message:id(RootProc, all)], normalize_env(Procs)).
+
+account_key(Account) when is_binary(Account) ->
+    hb_util:to_lower(Account).
+
+canonical_balances(Balances) ->
+    lists:foldl(
+        fun
+            ({ID, Amount}, Acc) when ?IS_ID(ID) ->
+                add_balance(account_key(hb_util:human_id(ID)), Amount, Acc);
+            ({Wallet, Amount}, Acc) when is_tuple(Wallet) ->
+                add_balance(account_key(hb_util:human_id(Wallet)), Amount, Acc);
+            (_Other, Acc) ->
+                Acc
+        end,
+        #{},
+        maps:to_list(Balances)
+    ).
+
+add_balance(Account, Amount, Balances) ->
+    Balances#{ Account => maps:get(Account, Balances, 0) + Amount }.

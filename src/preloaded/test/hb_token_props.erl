@@ -1,5 +1,5 @@
 %%% @doc Native token process invariant tests.
--module(dev_token_props).
+-module(hb_token_props).
 -include_lib("hb/include/hb.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -export([opts/0]).
@@ -10,13 +10,24 @@
 -define(MAX_TRANSFER_AMOUNT, 1_000_000_000_000_000_000 div 5).
 -define(NODE_WALLET_CACHE_KEY, {?MODULE, node_wallet}).
 -define(IDENTITIES_CACHE_KEY, {?MODULE, identities}).
+-define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
+-define(PROCESS_OUTBOX_IMPL, <<"IgFctN6dNiwIoQrONi__4trJ70bkamBXXp9ipyW3SQI">>).
+-define(SECURITY_DEVICE, <<"security@1.0">>).
+-define(SECURITY_IMPL, <<"t0UTvqWtUT2ohVw-bWPdnjbVCL2tPLFFmJAqBiFWmeY">>).
 
 opts() ->
     hb:init(),
     #{
         <<"load-remote-devices">> => false,
-        <<"store">> => [hb_test_utils:test_store()]
+        <<"trusted-devices">> => #{
+            ?PROCESS_OUTBOX_DEVICE => ?PROCESS_OUTBOX_IMPL,
+            ?SECURITY_DEVICE => ?SECURITY_IMPL
+        },
+        <<"store">> => [hb_test_utils:test_store() | default_stores()]
     }.
+
+default_stores() ->
+    hb_opts:get(store, [], hb_opts:default_message()).
 
 simulate_native_token_test_() ->
     {timeout, 120, fun simulate_native_token/0}.
@@ -212,7 +223,7 @@ generate_sim_request(_State, Opts) ->
                     <<"action">> => <<"Transfer">>,
                     <<"recipient">> => hb_util:human_id(RecipientWallet),
                     <<"quantity">> => Amount,
-                    <<"target">> => lib_process:process_id(Proc, #{}, SystemOpts)
+                    <<"target">> => process_id(Proc, #{}, SystemOpts)
                 },
                 UserOpts
             ),
@@ -236,8 +247,7 @@ generate_sim_request(_State, Opts) ->
                         <<"intent">> =>
                             #{
                                 <<"action">> => <<"transfer">>,
-                                <<"ledger">> =>
-                                    lib_process:process_id(Proc, #{}, ExecOpts),
+                                <<"ledger">> => process_id(Proc, #{}, ExecOpts),
                                 <<"sender">> => hb_util:human_id(SenderWallet),
                                 <<"recipient">> =>
                                     hb_util:human_id(RecipientWallet),
@@ -249,6 +259,31 @@ generate_sim_request(_State, Opts) ->
             {error, Reason} ->
                 {error, Reason}
         end
+    end.
+
+process_id(Process, Req, Opts) ->
+    ProcMsg =
+        case hb_ao:get(<<"process">>, Process, Opts#{ <<"hashpath">> => ignore }) of
+            not_found ->
+                {ok, Committed} = hb_message:with_only_committed(Process, Opts),
+                Committed;
+            Committed ->
+                Committed
+        end,
+    Signers = hb_message:signers(ProcMsg, Opts),
+    case {hb_message:verify(ProcMsg, all, Opts), Signers} of
+        {false, _} ->
+            ?event({process_not_verified, {process, ProcMsg}}),
+            throw({process_not_verified, ProcMsg});
+        {true, []} ->
+            ?event({process_has_no_signers, {process, ProcMsg}}),
+            throw({process_has_no_signers, ProcMsg});
+        {true, _} ->
+            hb_message:id(
+                ProcMsg,
+                hb_util:atom(maps:get(<<"commitments">>, Req, <<"signed">>)),
+                Opts
+            )
     end.
 
 verify_net_balance_unchanged(OldState, _Req, NewState, Opts) ->
@@ -291,8 +326,8 @@ verify_slot_increment(OldState, _Req, NewState, Opts) ->
     end.
 
 verify_all_balances_match(_Old1, _Old2, _Req, NewState, NewModelState, Opts) ->
-    NewBalances = balances(initial, NewState, Opts),
-    NewModelBalances = balances(initial, NewModelState, Opts),
+    NewBalances = canonical_balances(balances(initial, NewState, Opts)),
+    NewModelBalances = canonical_balances(balances(initial, NewModelState, Opts)),
     NewBalances =:= NewModelBalances orelse
         {
             error,
@@ -328,7 +363,35 @@ balances(Prefix, ProcMsg, Opts) ->
     ).
 
 balance(ID, ProcMsg, Opts) ->
-    case hb_ao:get(<<"balances/", ID/binary>>, ProcMsg, not_found, Opts) of
-        not_found -> hb_ao:get(<<"balance/", ID/binary>>, ProcMsg, not_found, Opts);
-        Found -> Found
+    Account = account_key(ID),
+    case hb_ao:get(<<"balances/", Account/binary>>, ProcMsg, not_found, Opts) of
+        not_found ->
+            case hb_ao:get(<<"balance/", Account/binary>>, ProcMsg, not_found, Opts) of
+                not_found ->
+                    case hb_ao:get(<<"balances/", ID/binary>>, ProcMsg, not_found, Opts) of
+                        not_found ->
+                            hb_ao:get(<<"balance/", ID/binary>>, ProcMsg, not_found, Opts);
+                        Found ->
+                            Found
+                    end;
+                Found ->
+                    Found
+            end;
+        Found ->
+            Found
     end.
+
+canonical_balances(Balances) ->
+    maps:fold(
+        fun(Account, Amount, Acc) when is_number(Amount) ->
+            Key = account_key(Account),
+            Acc#{ Key => maps:get(Key, Acc, 0) + Amount };
+            (_Account, _Amount, Acc) ->
+                Acc
+        end,
+        #{},
+        Balances
+    ).
+
+account_key(Account) when is_binary(Account) ->
+    hb_util:to_lower(Account).

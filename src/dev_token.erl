@@ -1,17 +1,18 @@
 %%% @doc A fast, simple implementation of AO token specification.
 %%% Specification: https://cookbook_ao.arweave.net/references/api/token.html
 -module(dev_token).
--export([compute/3, init/3, normalize/3, snapshot/3, balance/3, mint/3]).
+-export([info/0, compute/3, init/3, normalize/3, snapshot/3, balance/3, mint/3]).
 %%% Non-public device API functions. Note: Ensure that these are not exported
-%%% as publicly callable device keys, either by having arity >= 3, or explicitly
-%%% excluding in an `info/1` response.
+%%% as publicly callable device keys, either by having arity > 3, or by gating
+%%% the public surface in `info/0`.
 -export([handle_action/4]).
 %%% Public helpers.
 -export([validate_address/2]).
 -include_lib("hb/include/hb.hrl").
 
 -implements(<<"token@1.0">>).
--device_libraries([lib_process, lib_process_outbox, lib_trie]).
+
+-define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
 
 %% @doc `Action' values that should be handled by the `mint-device'.
 -define(MINT_ACTIONS,
@@ -72,180 +73,72 @@ end.
 
 %%% `~process@1.0' interface implementation.
 
-%% @doc No-op on process initialization.
-init(Base, _Req, _Opts) ->
+%% @doc Return the public token device API.
+info() ->
+    #{
+        exports =>
+            [
+                <<"compute">>,
+                <<"init">>,
+                <<"normalize">>,
+                <<"snapshot">>,
+                <<"balance">>,
+                <<"mint">>
+            ]
+    }.
+
+%% @doc Canonicalize account keys in the initial balance trie.
+init(Base, _Req, Opts) ->
+    canonicalize_balances(Base, Opts).
+
+%% @doc No-op on normalization.
+normalize(Base, _Req, _Opts) ->
     {ok, Base}.
 
-%% @doc Restore token checkpoints when `~process@1.0' loads a cached snapshot.
-normalize(Base, _Req, Opts) ->
-    case hb_maps:get(<<"snapshot">>, Base, not_found, Opts) of
+%% @doc No special processing for the creation of snapshots.
+snapshot(Base, _Req, _Opts) ->
+    {ok, Base}.
+
+canonicalize_balances(Base, Opts) ->
+    case hb_maps:get(<<"balances">>, Base, not_found, Opts) of
         not_found ->
             {ok, Base};
-        Snapshot0 ->
-            Snapshot = hb_cache:ensure_all_loaded(Snapshot0, Opts),
-            case is_token_checkpoint(Snapshot) of
-                true -> restore_checkpoint(Base, Snapshot, Opts);
+        Balances0 ->
+            Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
+            case is_map(Balances) of
+                true -> canonicalize_balances(Base, Balances, Opts);
                 false -> {ok, Base}
             end
     end.
 
-%% @doc Create a self-contained token checkpoint. The token state is serialized
-%% into the data body so balance trie keys never become transport tag names.
-snapshot(Base, _Req, Opts) ->
-    ProcID = lib_process:process_id(Base, #{}, Opts),
-    State0 = hb_maps:without([<<"snapshot">>, <<"process">>], Base, Opts),
-    State1 = hb_private:reset(State0),
-    State = hb_private:reset(hb_cache:ensure_all_loaded(State1, Opts)),
-    Payload = term_to_binary(State),
-    Snapshot = #{
-        <<"type">> => <<"Checkpoint">>,
-        <<"checkpoint-device">> => <<"token@1.0">>,
-        <<"checkpoint-format">> => <<"erlang-term-v1">>,
-        <<"content-type">> => <<"application/octet-stream">>,
-        <<"content-encoding">> => <<"gzip">>,
-        <<"process-id">> => ProcID,
-        <<"state-size">> => byte_size(Payload),
-        <<"sha-256">> => hb_util:human_id(crypto:hash(sha256, Payload)),
-        <<"timestamp">> => os:system_time(millisecond),
-        <<"data">> => zlib:gzip(Payload)
-    },
-    {ok,
-        case hb_ao:get(<<"at-slot">>, Base, undefined, Opts) of
-            undefined -> Snapshot;
-            Slot -> Snapshot#{ <<"checkpoint-slot">> => Slot }
-        end
-    }.
-
-is_token_checkpoint(Snapshot) when is_map(Snapshot) ->
-    maps:get(<<"checkpoint-device">>, Snapshot, not_found) =:= <<"token@1.0">>;
-is_token_checkpoint(_Snapshot) ->
-    false.
-
-restore_checkpoint(Base, Snapshot, Opts) ->
-    case validate_checkpoint_metadata(Base, Snapshot, Opts) of
-        {ok, Process} ->
-            case decode_checkpoint_state(Snapshot) of
-                {ok, State} ->
-                    case validate_checkpoint_state(State) of
-                        ok ->
-                            Restored0 =
-                                hb_maps:without(
-                                    [<<"snapshot">>, <<"process">>],
-                                    State,
-                                    Opts
-                                ),
-                            {ok,
-                                hb_maps:put(
-                                    <<"process">>,
-                                    Process,
-                                    Restored0,
-                                    Opts
-                                )
-                            };
-                        Error ->
-                            Error
-                    end;
-                Error ->
-                    Error
-            end;
-        Error ->
-            Error
+canonicalize_balances(Base, Balances, Opts) ->
+    {Changed, FlatBalances} =
+        lists:foldl(
+            fun(Key, {ChangedAcc, BalancesAcc}) ->
+                Account = account_key(Key),
+                {ok, Amount} = hb_ao:resolve(Balances, Key, Opts),
+                {
+                    ChangedAcc
+                        orelse (Account =/= Key)
+                        orelse maps:is_key(Account, BalancesAcc),
+                    add_balance(Account, Amount, BalancesAcc)
+                }
+            end,
+            {false, #{}},
+            trie_keys(Balances, Opts)
+        ),
+    case Changed of
+        false ->
+            {ok, Base};
+        true ->
+            {ok, NewBalances} =
+                hb_ao:resolve(
+                    #{<<"device">> => <<"trie@1.0">>},
+                    FlatBalances#{<<"path">> => <<"set">>},
+                    Opts
+                ),
+            {ok, hb_maps:put(<<"balances">>, NewBalances, Base, Opts)}
     end.
-
-validate_checkpoint_metadata(Base, Snapshot, Opts) ->
-    RequiredFields = [
-        {<<"type">>, <<"Checkpoint">>},
-        {<<"checkpoint-device">>, <<"token@1.0">>},
-        {<<"checkpoint-format">>, <<"erlang-term-v1">>},
-        {<<"content-type">>, <<"application/octet-stream">>},
-        {<<"content-encoding">>, <<"gzip">>}
-    ],
-    case validate_checkpoint_fields(Snapshot, RequiredFields) of
-        ok ->
-            BaseWithProcess = lib_process:ensure_process_key(Base, Opts),
-            ProcID = lib_process:process_id(BaseWithProcess, #{}, Opts),
-            case maps:get(<<"process-id">>, Snapshot, not_found) of
-                ProcID ->
-                    case hb_maps:get(
-                        <<"process">>,
-                        BaseWithProcess,
-                        not_found,
-                        Opts
-                    ) of
-                        not_found -> checkpoint_error(missing_process);
-                        Process -> {ok, Process}
-                    end;
-                _ ->
-                    checkpoint_error(process_id_mismatch)
-            end;
-        Error ->
-            Error
-    end.
-
-validate_checkpoint_fields(_Snapshot, []) ->
-    ok;
-validate_checkpoint_fields(Snapshot, [{Key, Expected}|Rest]) ->
-    case maps:get(Key, Snapshot, not_found) of
-        Expected -> validate_checkpoint_fields(Snapshot, Rest);
-        _ -> checkpoint_error({invalid_field, Key})
-    end.
-
-decode_checkpoint_state(Snapshot) ->
-    case {
-        maps:get(<<"data">>, Snapshot, not_found),
-        maps:get(<<"state-size">>, Snapshot, not_found),
-        maps:get(<<"sha-256">>, Snapshot, not_found)
-    } of
-        {Data, StateSize, Hash}
-                when is_binary(Data), is_integer(StateSize),
-                     StateSize >= 0, is_binary(Hash) ->
-            case gunzip_checkpoint(Data) of
-                {ok, Payload} ->
-                    ExpectedHash =
-                        hb_util:human_id(crypto:hash(sha256, Payload)),
-                    case {
-                        byte_size(Payload) =:= StateSize,
-                        ExpectedHash =:= Hash
-                    } of
-                        {true, true} -> decode_checkpoint_payload(Payload);
-                        {false, _} -> checkpoint_error(state_size_mismatch);
-                        {_, false} -> checkpoint_error(hash_mismatch)
-                    end;
-                Error ->
-                    Error
-            end;
-        _ ->
-            checkpoint_error(invalid_payload_metadata)
-    end.
-
-gunzip_checkpoint(Data) ->
-    try zlib:gunzip(Data) of
-        Payload -> {ok, Payload}
-    catch
-        _:_ -> checkpoint_error(invalid_gzip)
-    end.
-
-decode_checkpoint_payload(Payload) ->
-    try binary_to_term(Payload, [safe]) of
-        State -> {ok, State}
-    catch
-        _:_ -> checkpoint_error(invalid_erlang_term)
-    end.
-
-validate_checkpoint_state(State) when is_map(State) ->
-    case {
-        maps:get(<<"device">>, State, not_found),
-        maps:get(<<"balances">>, State, not_found)
-    } of
-        {<<"token@1.0">>, Balances} when is_map(Balances) -> ok;
-        {<<"token@1.0">>, _} -> checkpoint_error(invalid_balances);
-        _ -> checkpoint_error(invalid_token_state)
-    end;
-validate_checkpoint_state(_State) ->
-    checkpoint_error(invalid_token_state).
-
-checkpoint_error(Reason) ->
-    {error, {invalid_token_checkpoint, Reason}}.
 
 %% @doc Entrypoint for computations on token processes. Deduplicates by signed
 %% assignment body, then expects the `action' key to hold the `path' to execute
@@ -293,7 +186,13 @@ restore_device(Device, Base, Opts) ->
 
 %% @doc Enforce the security constraints of the base state upon the request.
 enforce_security(Base, Req, Opts) ->
-    case lib_process:run_as(<<"security">>, Base, Req, Opts) of
+    SecurityDevice = hb_maps:get(
+        <<"security-device">>,
+        Base,
+        <<"security@1.0">>,
+        Opts
+    ),
+    case run_as_device(<<"security">>, SecurityDevice, Base, Req, Opts) of
         {ok, SecureReq} -> {ok, SecureReq};
         {skip, Reason} -> {error, Reason}
     end.
@@ -301,13 +200,12 @@ enforce_security(Base, Req, Opts) ->
 %% @doc Route the request to the appropriate key resolution function, depending
 %% upon the `action' specified.
 handle_action(Action, Base, Req, Opts) ->
-    Self = lib_process:process_id(Base, #{}, Opts),
-    ?event(token_short, {token, {id, Self}, {action, Action}}, Opts),
+    ?event(token_short, {token_action, Action}, Opts),
     case hb_util:to_lower(hb_ao:normalize_key(Action)) of
         <<"transfer">> -> transfer(Base, Req, Opts);
         <<"set">> -> secure_set(Base, Req, Opts);
-        <<"subscribe">> -> lib_process_outbox:subscribe(Base, Req, Opts);
-        <<"unsubscribe">> -> lib_process_outbox:unsubscribe(Base, Req, Opts);
+        <<"subscribe">> -> outbox_subscribe(Base, Req, Opts);
+        <<"unsubscribe">> -> outbox_unsubscribe(Base, Req, Opts);
         MintDevAction -> action_as_mint_device(MintDevAction, Base, Req, Opts)
     end.
 
@@ -315,12 +213,14 @@ handle_action(Action, Base, Req, Opts) ->
 %% account before returning.
 balance(Base, Req, Opts) ->
     maybe
-        {ok, Account} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
-        true ?= validate_address(Account, []),
+        {ok, Account0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
+        true ?= validate_address(Account0, [], Opts),
+        Account = account_key(Account0),
         ?event(
             debug_token,
             {balance_request,
-                {account, Account},
+                {account, Account0},
+                {canonical_account, Account},
                 {base, Base}
             },
             Opts
@@ -359,12 +259,14 @@ transfer(Base, Assignment, Opts) ->
     maybe
         % Gather transfer data from the request.
         {ok, Req} ?= hb_ao:resolve(Assignment, <<"body">>, Opts),
-        {ok, From} ?= hb_ao:resolve(Req, <<"from">>, Opts),
-        {ok, Recipient} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
+        {ok, From0} ?= hb_ao:resolve(Req, <<"from">>, Opts),
+        {ok, Recipient0} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
         {ok, Quantity} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
         % validate From/Recipient sanity
-        true ?= validate_address(From, []),
-        true ?= validate_address(Recipient, []),
+        true ?= validate_address(From0, [], Opts),
+        true ?= validate_address(Recipient0, [], Opts),
+        From = account_key(From0),
+        Recipient = account_key(Recipient0),
         % Normalize the base's minting state for the sender.
         {ok, NormBase} ?=
             normalize_mint(
@@ -414,8 +316,8 @@ transfer(Base, Assignment, Opts) ->
                     hb_maps:put(<<"balances">>, NewBalances, NormBase, Opts)
             end,
         % Send transfer notices.
-        WithNotices = lib_process_outbox:send(
-            transfer_notices(From, Recipient, Quantity, Req, Opts),
+        {ok, WithNotices} ?= outbox_send(
+            transfer_notices(From0, Recipient0, Quantity, Req, Opts),
             NewBaseAfterTransfer,
             Opts
         ),
@@ -435,7 +337,7 @@ transfer(Base, Assignment, Opts) ->
 
 transfer_notices(From, Recipient, Quantity, Req, Opts) ->
     % Extract forwarded keys (X- prefixed fields from request)
-    ForwardedKeys = lib_process_outbox:forwarded_keys(Req, Opts),
+    ForwardedKeys = forwarded_keys(Req, Opts),
     DebitNotice =
         ForwardedKeys#{
             <<"action">> => <<"Debit-Notice">>,
@@ -469,8 +371,14 @@ mint(Base, Assignment, Opts) ->
                     as_mint_device(<<"mint">>, Base, Assignment, Opts);
                 {ok, Subject} ->
                     maybe
-                        true ?= validate_address(Subject, []),
-                        MintReq1 = hb_ao:set(Assignment, <<"subject">>, Subject, Opts),
+                        true ?= validate_address(Subject, [], Opts),
+                        MintReq1 =
+                            hb_ao:set(
+                                Assignment,
+                                <<"subject">>,
+                                account_key(Subject),
+                                Opts
+                            ),
                         as_mint_device(<<"mint">>, Base, MintReq1, Opts)
                     end
             end
@@ -510,9 +418,12 @@ action_as_mint_device(Action, Base, Req, Opts) ->
 
 %% @doc Run a given `path' on the mint device.
 as_mint_device(Path, Base, Req, Opts) ->
-    lib_process:run_as(
+    MintBase = ensure_mint_device(Base, Opts),
+    MintDevice = hb_ao:get(<<"mint-device">>, MintBase, Opts),
+    run_as_device(
         <<"mint">>,
-        ensure_mint_device(Base, Opts),
+        MintDevice,
+        MintBase,
         Req#{ <<"path">> => Path },
         Opts
     ).
@@ -575,7 +486,7 @@ enforce_whitelisted_fields(Base, Req, Opts) ->
 
 %% @doc Enforce that the caller is the `set` authority. If `Base` configures
 %% either `set-authority-required` or `set-authority-match`, this function
-%% delegates authorization to `dev_security:validate/5` for `set-authority`.
+%% delegates authorization to the configured security device for `set-authority`.
 %% Otherwise it falls back to legacy exact-match semantics:
 %% `Req/from =:= Base/set-authority`.
 enforce_set_authority(Base, Req, Opts) ->
@@ -607,7 +518,7 @@ enforce_set_authority(Base, Req, Opts) ->
     end.
 
 enforce_legacy_set_authority(Setter, Base, Opts) ->
-    case validate_address(Setter, []) of
+    case validate_address(Setter, [], Opts) of
         true ->
             SetAuthority = hb_ao:get(<<"set-authority">>, Base, Opts),
             case SetAuthority of
@@ -629,17 +540,27 @@ enforce_legacy_set_authority(Setter, Base, Opts) ->
 
 %% @doc Validate address format for security. the validation
 %% allows binary addresses up to 128 bytes and prevent invalid
-%% addresses such as lib_trie reserved keys.
-validate_address(Address, CustomList) when is_binary(Address), is_list(CustomList) ->
+%% addresses such as trie reserved keys.
+validate_address(Address, CustomList) ->
+    validate_address(Address, CustomList, #{}).
+
+validate_address(Address, CustomList, Opts) when is_binary(Address), is_list(CustomList) ->
     ReservedKeys = ?AO_RESERVED_ADDRESS_KEYS ++ CustomList,
+    AccountKey = account_key(Address),
+    CanonicalReservedKeys = [account_key(Key) || Key <- ReservedKeys, is_binary(Key)],
     case byte_size(Address) of
         0 -> {error, <<"Address cannot be empty.">>};
         N when N > 128 -> {error, <<"Address is too long.">>};
         _ ->
+            TrieReservedKeys = trie_reserved_keys(Opts),
             maybe
-                true ?= (not lib_trie:is_reserved_key(Address))
+                true ?= (not is_reserved_trie_key(Address, TrieReservedKeys))
+                    orelse {error, <<"Address uses a reserved trie internal key.">>},
+                true ?= (not is_reserved_trie_key(AccountKey, TrieReservedKeys))
                     orelse {error, <<"Address uses a reserved trie internal key.">>},
                 true ?= (not is_reserved_custom_key(Address, ReservedKeys))
+                    orelse {error, <<"Address is a reserved ao/custom key">>},
+                true ?= (not is_reserved_custom_key(AccountKey, CanonicalReservedKeys))
                     orelse {error, <<"Address is a reserved ao/custom key">>},
                 % Check for path separators (security: prevent path traversal) and whitespaces.
                 case binary:match(Address, [<<"/">>, <<"\\">>, <<" ">>, <<"\n">>, <<"\r">>, <<"\t">>]) of
@@ -648,17 +569,137 @@ validate_address(Address, CustomList) when is_binary(Address), is_list(CustomLis
                 end
             end
     end;
-validate_address(_, _) ->
+validate_address(_, _, _) ->
     {error, <<"Address must be a binary.">>}.
+
+account_key(Address) when is_binary(Address) ->
+    hb_util:to_lower(Address).
+
+trie_keys(Balances, Opts) ->
+    {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
+    Trie:keys(Balances, Opts).
+
+is_reserved_trie_key(Key, ReservedKeys) ->
+    lists:member(Key, ReservedKeys).
+
+trie_reserved_keys(Opts) ->
+    {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
+    maps:get(reserved, Trie:info(), []).
+
+add_balance(Account, Amount, Balances) ->
+    Balances#{ Account => maps:get(Account, Balances, 0) + Amount }.
+
 %% @doc Check if the given Key exists in the passed List
 is_reserved_custom_key(Key, List) when is_binary(Key), is_list(List) ->
     lists:member(Key, List);
 is_reserved_custom_key(_, _) -> 
     false.
 
+outbox_send(Messages, Base, Opts) ->
+    maybe
+        {ok, Outbox} ?= process_outbox(Opts),
+        Outbox:send(
+            Base,
+            #{ <<"messages">> => Messages },
+            Opts
+        )
+    end.
+
+outbox_subscribe(Base, Req, Opts) ->
+    maybe
+        {ok, Outbox} ?= process_outbox(Opts),
+        Outbox:subscribe(Base, Req, Opts)
+    end.
+
+outbox_unsubscribe(Base, Req, Opts) ->
+    maybe
+        {ok, Outbox} ?= process_outbox(Opts),
+        Outbox:unsubscribe(Base, Req, Opts)
+    end.
+
+process_outbox(Opts) ->
+    case hb_device_load:reference(?PROCESS_OUTBOX_DEVICE, Opts) of
+        {ok, Outbox} ->
+            {ok, Outbox};
+        {error, Reason} ->
+            {error, {process_outbox_not_loadable, Reason}}
+    end.
+
+forwarded_keys(Req, Opts) ->
+    hb_maps:filter(
+        fun(Key, _Value) ->
+            KeyBin = hb_util:to_lower(hb_util:bin(Key)),
+            binary:match(KeyBin, <<"x-">>) =:= {0, 2}
+        end,
+        Req,
+        Opts
+    ).
+
 security_validate(Key, Base, SubjectMsg, From, Opts) ->
-    {ok, Security} = hb_device_load:reference(<<"security@1.0">>, Opts),
-    Security:validate(Key, Base, SubjectMsg, From, Opts).
+    SecurityDevice = hb_maps:get(
+        <<"security-device">>,
+        Base,
+        <<"security@1.0">>,
+        Opts
+    ),
+    ValidateReq = #{
+        <<"path">> => <<"validate">>,
+        <<"key">> => Key,
+        <<"subject">> => SubjectMsg,
+        <<"from">> => From
+    },
+    case run_as_device(<<"security">>, SecurityDevice, Base, ValidateReq, Opts) of
+        {ok, true} -> true;
+        {error, Reason} -> {error, Reason};
+        {skip, Reason} -> {error, Reason};
+        Other -> {error, {security_validate_unexpected_result, Other}}
+    end.
+
+run_as_device(Key, Device, Base, Path, Opts) when not is_map(Path) ->
+    run_as_device(Key, Device, Base, #{ <<"path">> => Path }, Opts);
+run_as_device(Key, Device, Base, Req, Opts) ->
+    BaseDevice = hb_maps:get(<<"device">>, Base, not_found, Opts),
+    {ok, PreparedMsg} =
+        hb_ao:resolve(
+            ensure_process_key(Base, Opts),
+            #{
+                <<"path">> => <<"set">>,
+                <<"device">> => Device,
+                <<"input-prefix">> =>
+                    case hb_maps:get(<<"input-prefix">>, Base, not_found, Opts) of
+                        not_found -> <<"process">>;
+                        Prefix -> Prefix
+                    end,
+                <<"output-prefixes">> =>
+                    hb_maps:get(
+                        <<Key/binary, "-output-prefixes">>,
+                        Base,
+                        undefined,
+                        Opts
+                    )
+            },
+            Opts
+        ),
+    {Status, BaseResult} = hb_ao:resolve(PreparedMsg, Req, Opts),
+    case {Status, BaseResult} of
+        {ok, #{ <<"device">> := Device }} ->
+            {ok, hb_ao:set(BaseResult, #{ <<"device">> => BaseDevice }, Opts)};
+        _ ->
+            {Status, BaseResult}
+    end.
+
+ensure_process_key(Base, Opts) ->
+    case hb_maps:get(<<"process">>, Base, not_found, Opts) of
+        not_found ->
+            {ok, Committed} = hb_message:with_only_committed(Base, Opts),
+            hb_ao:set(
+                hb_message:uncommitted(Base, Opts),
+                #{ <<"process">> => Committed },
+                Opts#{ <<"hashpath">> => ignore }
+            );
+        _ ->
+            Base
+    end.
 
 send_error(Base, Assignment, Reason, Opts) when is_atom(Reason) ->
     send_error(Base, Assignment, atom_to_binary(Reason), Opts);
@@ -675,14 +716,12 @@ send_error(Base, Assignment, Reason, Opts) when is_binary(Reason) ->
             ?event(token_short, {skipping_error_report, Error}, Opts),
             {ok, Base};
         {ok, Target} ->
-            {ok,
-                lib_process_outbox:send(
-                    #{
-                        <<"target">> => Target,       
-                        <<"reason">> => Reason
-                    },
-                    Base,
-                    Opts
-                )
-            }
+            outbox_send(
+                #{
+                    <<"target">> => Target,
+                    <<"reason">> => Reason
+                },
+                Base,
+                Opts
+            )
     end.
