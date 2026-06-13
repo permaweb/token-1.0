@@ -6,7 +6,7 @@
 -define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
 -define(PROCESS_OUTBOX_IMPL, <<"IgFctN6dNiwIoQrONi__4trJ70bkamBXXp9ipyW3SQI">>).
 -define(SECURITY_DEVICE, <<"security@1.0">>).
--define(SECURITY_IMPL, <<"t0UTvqWtUT2ohVw-bWPdnjbVCL2tPLFFmJAqBiFWmeY">>).
+-define(SECURITY_IMPL, <<"ARgymad5oYZcWPpxuV-A9hoSgmm4ElgPIvxMwmeh674">>).
 
 opts() ->
     hb:init(),
@@ -513,7 +513,7 @@ fixed_supply_name_token_flow_test() ->
         ),
     ?assertEqual(not_found, hb_ao:get(<<"mint-device">>, Base, Opts)),
     ?assertEqual(
-        {error, <<"Caller is not the `set-authority'.">>},
+        {error, <<"Too few acceptable committers present.">>},
         set_field(Base, Owner, #{ <<"name">> => <<"alice">> }, Opts)
     ),
     {ok, WithMetadata} =
@@ -669,6 +669,109 @@ default_whitelist_wildcard_allows_set_test() ->
     {ok, Updated} =
         set_field(Base, Setter, #{ <<"logo">> => <<"logo-a">> }, Opts),
     ?assertEqual(<<"logo-a">>, hb_ao:get(<<"logo">>, Updated, Opts)).
+
+set_authority_dynamic_full_owner_default_test() ->
+    Opts = opts(),
+    Owner = id(<<"owner">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 10,
+                initial_balances => #{ Owner => 10 }
+            },
+            Opts
+        ),
+    {ok, Updated} =
+        set_field(Base, Owner, #{ <<"logo">> => <<"logo-a">> }, Opts),
+    ?assertEqual(<<"logo-a">>, hb_ao:get(<<"logo">>, Updated, Opts)).
+
+set_authority_dynamic_tracks_current_full_owner_test() ->
+    Opts = opts(),
+    Owner = id(<<"owner">>),
+    NewOwner = id(<<"new-owner">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Owner => 1 }
+            },
+            Opts
+        ),
+    {ok, WithLogoA} =
+        set_field(Base, Owner, #{ <<"logo">> => <<"logo-a">> }, Opts),
+    {ok, Transferred} = transfer(WithLogoA, Owner, NewOwner, 1, Opts),
+    ?assertEqual(
+        {error, <<"Supply-threshold owner requirement not satisfied.">>},
+        set_field(Transferred, Owner, #{ <<"logo">> => <<"logo-b">> }, Opts)
+    ),
+    {ok, WithLogoC} =
+        set_field(Transferred, NewOwner, #{ <<"logo">> => <<"logo-c">> }, Opts),
+    ?assertEqual(<<"logo-c">>, hb_ao:get(<<"logo">>, WithLogoC, Opts)).
+
+set_authority_dynamic_split_supply_rejected_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 10,
+                initial_balances => #{ Alice => 5, Bob => 5 }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Supply-threshold owner requirement not satisfied.">>},
+        set_field(Base, Alice, #{ <<"logo">> => <<"logo-a">> }, Opts)
+    ).
+
+set_authority_dynamic_threshold_bps_allows_configured_owner_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 10,
+                initial_balances => #{ Alice => 5, Bob => 5 },
+                extra =>
+                    #{
+                        <<"set-authority-template">> => <<"supply-threshold-owner">>,
+                        <<"set-authority-threshold-bps">> => 5000
+                    }
+            },
+            Opts
+        ),
+    {ok, Updated} =
+        set_field(Base, Alice, #{ <<"logo">> => <<"logo-a">> }, Opts),
+    ?assertEqual(<<"logo-a">>, hb_ao:get(<<"logo">>, Updated, Opts)).
+
+set_authority_dynamic_zero_supply_rejected_test() ->
+    Opts = opts(),
+    Setter = id(<<"setter">>),
+    Base = token_state(#{}, Opts),
+    ?assertEqual(
+        {error, <<"Total supply must be positive.">>},
+        set_field(Base, Setter, #{ <<"logo">> => <<"logo-a">> }, Opts)
+    ).
+
+set_authority_static_uses_dev_security_test() ->
+    Opts = opts(),
+    Setter = id(<<"setter">>),
+    Base =
+        token_state(
+            #{
+                extra => #{ <<"set-authority">> => Setter }
+            },
+            Opts
+        ),
+    {ok, Updated} =
+        set_field(Base, Setter, #{ <<"logo">> => <<"logo-a">> }, Opts),
+    ?assertEqual(<<"logo-a">>, hb_ao:get(<<"logo">>, Updated, Opts)),
+    ?assertEqual(
+        {error, <<"Too few acceptable committers present.">>},
+        set_field(Base, id(<<"other">>), #{ <<"logo">> => <<"logo-b">> }, Opts)
+    ).
 
 set_authority_required_uses_dev_security_test() ->
     Opts = opts(),

@@ -484,56 +484,22 @@ enforce_whitelisted_fields(Base, Req, Opts) ->
             end
     end.
 
-%% @doc Enforce that the caller is the `set` authority. If `Base` configures
-%% either `set-authority-required` or `set-authority-match`, this function
-%% delegates authorization to the configured security device for `set-authority`.
-%% Otherwise it falls back to legacy exact-match semantics:
-%% `Req/from =:= Base/set-authority`.
+%% @doc Enforce that the caller is the `set` authority. The configured security
+%% device owns both static signer-set and dynamic ownership semantics.
 enforce_set_authority(Base, Req, Opts) ->
     maybe
         Setter = hb_ao:get(<<"from">>, Req, Opts),
         true ?= (Setter =/= not_found) orelse
                 {error, <<"Setter not found.">>},
-        SetAuthorityRequired =
-            hb_ao:get(<<"set-authority-required">>, Base, not_found, Opts),
-        SetAuthorityMatch =
-            hb_ao:get(<<"set-authority-match">>, Base, not_found, Opts),
-        AuthRes = case
-            (SetAuthorityRequired =/= not_found)
-            orelse
-            (SetAuthorityMatch =/= not_found)
-        of
-            true ->
-                security_validate(
-                    <<"set-authority">>,
-                    Base,
-                    Req,
-                    Setter,
-                    Opts
-                );
-            false ->
-                enforce_legacy_set_authority(Setter, Base, Opts)
-        end,
+        AuthRes =
+            security_validate(
+                <<"set-authority">>,
+                Base,
+                Req,
+                Setter,
+                Opts
+            ),
         true ?= AuthRes
-    end.
-
-enforce_legacy_set_authority(Setter, Base, Opts) ->
-    case validate_address(Setter, [], Opts) of
-        true ->
-            SetAuthority = hb_ao:get(<<"set-authority">>, Base, Opts),
-            case SetAuthority of
-                not_found ->
-                    {error, <<"SetAuthority not found.">>};
-                _ ->
-                    case {Setter, SetAuthority} of
-                        {S, S} ->
-                            true;
-                        _ ->
-                            {error, <<"Caller is not the `set-authority'.">>}
-                    end
-            end;
-        {error, _} = Err ->
-            Err
     end.
 
 %%% Helper functions.
