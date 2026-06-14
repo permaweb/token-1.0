@@ -190,6 +190,19 @@ set_field(State, From, Fields, Opts) ->
         Opts
     ).
 
+signed_set_field(State, From, Fields, Opts) ->
+    SignedBody =
+        hb_message:commit(
+            Fields#{ <<"action">> => <<"Set">>, <<"from">> => From },
+            Opts
+        ),
+    dev_token:handle_action(
+        <<"set">>,
+        State,
+        #{ <<"body">> => SignedBody },
+        Opts
+    ).
+
 balance_existing_account_test() ->
     Opts = opts(),
     Alice = id(<<"alice">>),
@@ -669,6 +682,86 @@ default_whitelist_wildcard_allows_set_test() ->
     {ok, Updated} =
         set_field(Base, Setter, #{ <<"logo">> => <<"logo-a">> }, Opts),
     ?assertEqual(<<"logo-a">>, hb_ao:get(<<"logo">>, Updated, Opts)).
+
+signed_set_strips_commitments_before_whitelist_test() ->
+    Opts = opts(),
+    Setter = id(<<"setter">>),
+    Base =
+        token_state(
+            #{
+                extra =>
+                    #{
+                        <<"set-authority">> => Setter,
+                        <<"whitelisted-fields">> => [<<"logo">>]
+                    }
+            },
+            Opts
+        ),
+    {ok, Updated} =
+        signed_set_field(Base, Setter, #{ <<"logo">> => <<"logo-signed">> }, Opts),
+    ?assertEqual(<<"logo-signed">>, hb_ao:get(<<"logo">>, Updated, Opts)).
+
+set_does_not_persist_control_keys_test() ->
+    Opts = opts(),
+    Setter = id(<<"setter">>),
+    Base =
+        token_state(
+            #{
+                extra => #{ <<"set-authority">> => Setter }
+            },
+            Opts
+        ),
+    BaseCommitments = hb_maps:get(<<"commitments">>, Base, not_found, Opts),
+    ControlFields =
+        #{
+            <<"action">> => <<"Transfer">>,
+            <<"path">> => <<"evil-path">>,
+            <<"body">> => #{ <<"evil">> => true },
+            <<"commitments">> => #{ <<"evil">> => true },
+            <<"committers">> => [<<"evil">>],
+            <<"ao-types">> => <<"evil=atom">>,
+            <<"target">> => <<"evil-target">>,
+            <<"type">> => <<"Message">>,
+            <<"id">> => <<"evil-id">>,
+            <<"timestamp">> => 1,
+            <<"variant">> => <<"evil-variant">>,
+            <<"data-protocol">> => <<"evil-protocol">>,
+            <<"set-mode">> => <<"explicit">>,
+            <<"priv">> => #{ <<"evil">> => true },
+            <<"hashpath">> => <<"evil-hashpath">>
+        },
+    {ok, Updated} =
+        set_field(
+            Base,
+            Setter,
+            ControlFields#{ <<"logo">> => <<"logo-a">> },
+            Opts
+        ),
+    ?assertEqual(<<"logo-a">>, hb_ao:get(<<"logo">>, Updated, Opts)),
+    ?assertEqual(not_found, hb_maps:get(<<"action">>, Updated, not_found, Opts)),
+    ?assertEqual(not_found, hb_maps:get(<<"path">>, Updated, not_found, Opts)),
+    ?assertEqual(not_found, hb_maps:get(<<"body">>, Updated, not_found, Opts)),
+    ?assertEqual(
+        BaseCommitments,
+        hb_maps:get(<<"commitments">>, Updated, not_found, Opts)
+    ),
+    ?assertEqual(not_found, hb_maps:get(<<"committers">>, Updated, not_found, Opts)),
+    ?assertEqual(not_found, hb_maps:get(<<"ao-types">>, Updated, not_found, Opts)),
+    ?assertEqual(not_found, hb_maps:get(<<"target">>, Updated, not_found, Opts)),
+    ?assertEqual(not_found, hb_maps:get(<<"type">>, Updated, not_found, Opts)),
+    ?assertEqual(not_found, hb_maps:get(<<"id">>, Updated, not_found, Opts)),
+    ?assertEqual(not_found, hb_maps:get(<<"timestamp">>, Updated, not_found, Opts)),
+    ?assertEqual(not_found, hb_maps:get(<<"variant">>, Updated, not_found, Opts)),
+    ?assertEqual(
+        not_found,
+        hb_maps:get(<<"data-protocol">>, Updated, not_found, Opts)
+    ),
+    ?assertEqual(not_found, hb_maps:get(<<"set-mode">>, Updated, not_found, Opts)),
+    ?assertNotEqual(
+        #{ <<"evil">> => true },
+        hb_maps:get(<<"priv">>, Updated, not_found, Opts)
+    ),
+    ?assertEqual(not_found, hb_maps:get(<<"hashpath">>, Updated, not_found, Opts)).
 
 set_authority_dynamic_full_owner_default_test() ->
     Opts = opts(),
