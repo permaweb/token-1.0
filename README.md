@@ -1,4 +1,4 @@
-# `token_package`
+# `token@1.0`
 
 HyperBEAM Forge package for AO token-family devices. The package root devices
 are:

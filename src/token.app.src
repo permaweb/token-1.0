@@ -1,4 +1,4 @@
-{application, token_package,
+{application, token,
     [
         {description, "token execution device package"},
         {vsn, "0.1.0"},
