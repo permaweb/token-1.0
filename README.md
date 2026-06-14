@@ -56,6 +56,29 @@ src:
 }
 ```
 
+## interaction with deployed token
+
+use the process path for token semantics. this gives `process@1.0` a chance to
+load the current state, run `token@1.0/init` if needed, and then switch into the
+execution device:
+
+```bash
+GET /<token-id>/now/as/balance?as=execution&balance=<address>
+GET /<token-id>/now
+POST /<token-id>/schedule
+```
+
+raw state paths are only for inspection:
+
+```bash
+GET /<token-id>/balances/<exact-raw-key>
+GET /<token-id>/now/balances/<canonical-key>
+```
+
+dont use `/<token-id>~token@1.0/balance?...` as the normal client path. That
+calls the token device against the raw published item and bypasses
+`process@1.0` initialization/caching.
+
 ## Publish
 
 ```sh
