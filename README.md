@@ -1,14 +1,6 @@
 # `token@1.0`
 
-HyperBEAM Forge package for AO token-family devices. The package root devices
-are:
-
-- `security@1.0`: security normalization and authority checks for process
-  assignments.
-- `token@1.0`: AO token process execution, transfers, subscriptions, and mint
-  delegation.
-
-## Build And Verify
+## build and verify
 
 ```sh
 rebar3 compile
@@ -16,7 +8,7 @@ rebar3 device verify
 rebar3 device package
 ```
 
-## Test
+## test
 
 ```sh
 HB_PORT=0 rebar3 device test
@@ -33,7 +25,7 @@ impl=rRDu38GMdk7Tv9CLMuM3lpm06kH_NvMuwwbcM-zNlRc
 
 signer=vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0
 ```
-## Local Node
+## local node
 
 ```sh
 HB_CONFIG=config.json rebar3 device local
@@ -79,8 +71,11 @@ dont use `/<token-id>~token@1.0/balance?...` as the normal client path. That
 calls the token device against the raw published item and bypasses
 `process@1.0` initialization/caching.
 
-## Publish
+## publish
 
 ```sh
 rebar3 device publish --key wallet.json
 ```
+
+## License
+this package is licensed under the [MIT License](./LICENSE)
