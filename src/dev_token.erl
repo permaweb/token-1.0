@@ -26,6 +26,28 @@
         <<"register">>
     ]
 ).
+%% @doc Root-level request envelope/control keys that must never become token
+%% state through `Set'. Authority checks still see the original request.
+-define(SET_CONTROL_KEYS,
+    [
+        <<"from">>,
+        <<"action">>,
+        <<"path">>,
+        <<"body">>,
+        <<"commitments">>,
+        <<"committers">>,
+        <<"ao-types">>,
+        <<"target">>,
+        <<"type">>,
+        <<"id">>,
+        <<"timestamp">>,
+        <<"variant">>,
+        <<"data-protocol">>,
+        <<"set-mode">>,
+        <<"priv">>,
+        <<"hashpath">>
+    ]
+).
 %% @doc `validate_address/2` built-in reserved keys list
 -define(AO_RESERVED_ADDRESS_KEYS,
     [
@@ -450,20 +472,19 @@ ensure_mint_device(Base, Opts) ->
 %% base state if so. The setter can only mutate whitelisted fields.
 secure_set(Base, Assignment, Opts) ->
     maybe
-        {ok, Req} ?= hb_ao:resolve(Assignment, <<"body">>, Opts),
+        Req = hb_maps:get(<<"body">>, Assignment, not_found, Opts),
+        true ?= is_map(Req) orelse {error, <<"Set body must be a message.">>},
         true ?= enforce_set_authority(Base, Req, Opts),
-        RawBody = hb_maps:get(<<"body">>, Assignment, #{}, Opts),
-        SetReq =
-            hb_maps:without(
-                [<<"from">>, <<"action">>, <<"path">>],
-                RawBody,
-                Opts
-            ),
+        Mutation = set_mutation_fields(Req, Opts),
         % Check the auth is touching whitelisted fields only.
-        true ?= enforce_whitelisted_fields(Base, SetReq, Opts),
+        true ?= enforce_whitelisted_fields(Base, Mutation, Opts),
         % Apply updates to base state.
-        hb_ao:resolve(Base, Req#{ <<"path">> => <<"set">> }, Opts)
+        hb_ao:resolve(Base, Mutation#{ <<"path">> => <<"set">> }, Opts)
     end.
+
+set_mutation_fields(Req, Opts) ->
+    hb_maps:without(?SET_CONTROL_KEYS, Req, Opts).
+
 enforce_whitelisted_fields(Base, Req, Opts) ->
     maybe
         Keys = hb_maps:keys(Req, Opts),
@@ -484,56 +505,22 @@ enforce_whitelisted_fields(Base, Req, Opts) ->
             end
     end.
 
-%% @doc Enforce that the caller is the `set` authority. If `Base` configures
-%% either `set-authority-required` or `set-authority-match`, this function
-%% delegates authorization to the configured security device for `set-authority`.
-%% Otherwise it falls back to legacy exact-match semantics:
-%% `Req/from =:= Base/set-authority`.
+%% @doc Enforce that the caller is the `set` authority. The configured security
+%% device owns both static signer-set and dynamic ownership semantics.
 enforce_set_authority(Base, Req, Opts) ->
     maybe
         Setter = hb_ao:get(<<"from">>, Req, Opts),
         true ?= (Setter =/= not_found) orelse
                 {error, <<"Setter not found.">>},
-        SetAuthorityRequired =
-            hb_ao:get(<<"set-authority-required">>, Base, not_found, Opts),
-        SetAuthorityMatch =
-            hb_ao:get(<<"set-authority-match">>, Base, not_found, Opts),
-        AuthRes = case
-            (SetAuthorityRequired =/= not_found)
-            orelse
-            (SetAuthorityMatch =/= not_found)
-        of
-            true ->
-                security_validate(
-                    <<"set-authority">>,
-                    Base,
-                    Req,
-                    Setter,
-                    Opts
-                );
-            false ->
-                enforce_legacy_set_authority(Setter, Base, Opts)
-        end,
+        AuthRes =
+            security_validate(
+                <<"set-authority">>,
+                Base,
+                Req,
+                Setter,
+                Opts
+            ),
         true ?= AuthRes
-    end.
-
-enforce_legacy_set_authority(Setter, Base, Opts) ->
-    case validate_address(Setter, [], Opts) of
-        true ->
-            SetAuthority = hb_ao:get(<<"set-authority">>, Base, Opts),
-            case SetAuthority of
-                not_found ->
-                    {error, <<"SetAuthority not found.">>};
-                _ ->
-                    case {Setter, SetAuthority} of
-                        {S, S} ->
-                            true;
-                        _ ->
-                            {error, <<"Caller is not the `set-authority'.">>}
-                    end
-            end;
-        {error, _} = Err ->
-            Err
     end.
 
 %%% Helper functions.
@@ -635,17 +622,19 @@ forwarded_keys(Req, Opts) ->
         Opts
     ).
 
-security_validate(Key, Base, SubjectMsg, From, Opts) ->
+security_validate(Key, Base, _SubjectMsg, From, Opts) ->
     SecurityDevice = hb_maps:get(
         <<"security-device">>,
         Base,
         <<"security@1.0">>,
         Opts
     ),
+    % `From' has already been normalized by `security@1.0' in the compute path.
+    % Do not pass the Set body back as a validation subject: root keys such as
+    % `path' are user mutation data here and must not affect security routing.
     ValidateReq = #{
         <<"path">> => <<"validate">>,
         <<"key">> => Key,
-        <<"subject">> => SubjectMsg,
         <<"from">> => From
     },
     case run_as_device(<<"security">>, SecurityDevice, Base, ValidateReq, Opts) of
