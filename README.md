@@ -27,9 +27,9 @@ rebar3 eunit-all
 ```bash
 device publish: token@1.0 
 
-spec=TZlNNHoG4OnnL3pbLNxp-3u_TxqKW-AHT6b3PbKruok 
+spec=LG06XpaM8FqTD80TLJ2gYTybGuW8tdQsk0WcTWMBa84 
 
-impl=M-VDVKYNRIw6-bgZz2EJbQ6ua-sW2CpYCj9hT42-Rgc 
+impl=rRDu38GMdk7Tv9CLMuM3lpm06kH_NvMuwwbcM-zNlRc 
 
 signer=vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0
 ```
