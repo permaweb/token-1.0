@@ -19,9 +19,9 @@ rebar3 eunit-all
 ```bash
 device publish: token@1.0 
 
-spec=LG06XpaM8FqTD80TLJ2gYTybGuW8tdQsk0WcTWMBa84 
+spec=ibZf_Tqk4omTejmBIgCI6HCvp5HWYlgKhjkDMZPh4UY 
 
-impl=rRDu38GMdk7Tv9CLMuM3lpm06kH_NvMuwwbcM-zNlRc 
+impl=y8vkutjPnDdfOLP2ISSnj1eOBw9x0jTddgY4dhVpWrQ 
 
 signer=vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0
 ```
@@ -36,13 +36,13 @@ HyperBEAM's `trusted-devices` runtime map.
 
 src:
 
-* https://github.com/permaweb/process-outbox
+* https://github.com/permaweb/process-outbox-1.0
 * https://github.com/permaweb/security-1.0
 
 ```json
 {
   "trusted-devices": {
-    "process-outbox@1.0": "IgFctN6dNiwIoQrONi__4trJ70bkamBXXp9ipyW3SQI",
+    "process-outbox@1.0": "HOcPV7wxMHYb3rSQ3EfykQhHx_b8waRWhXolhcBNgHo",
     "security@1.0": "ARgymad5oYZcWPpxuV-A9hoSgmm4ElgPIvxMwmeh674"
   }
 }

@@ -4,7 +4,7 @@
 -include_lib("hb/include/hb.hrl").
 
 -define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
--define(PROCESS_OUTBOX_IMPL, <<"IgFctN6dNiwIoQrONi__4trJ70bkamBXXp9ipyW3SQI">>).
+-define(PROCESS_OUTBOX_IMPL, <<"HOcPV7wxMHYb3rSQ3EfykQhHx_b8waRWhXolhcBNgHo">>).
 -define(SECURITY_DEVICE, <<"security@1.0">>).
 -define(SECURITY_IMPL, <<"ARgymad5oYZcWPpxuV-A9hoSgmm4ElgPIvxMwmeh674">>).
 
