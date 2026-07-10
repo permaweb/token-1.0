@@ -259,6 +259,7 @@ transfer(Base, Assignment, Opts) ->
         {ok, From0} ?= hb_ao:resolve(Req, <<"from">>, Opts),
         {ok, Recipient0} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
         {ok, Quantity} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
+        true ?= transfer_enabled(Base, Opts),
         % validate From/Recipient sanity
         true ?= hb_util:validate_address(From0, [], Opts),
         true ?= hb_util:validate_address(Recipient0, [], Opts),
@@ -330,6 +331,14 @@ transfer(Base, Assignment, Opts) ->
                 Opts
             ),
             send_error(Base, Assignment, Reason, Opts)
+    end.
+
+transfer_enabled(Base, Opts) ->
+    Default = hb_opts:get(<<"transfer-enabled">>, true, Opts),
+    case hb_ao:get(<<"transfer-enabled">>, Base, Default, Opts) of
+        true -> true;
+        false -> {error, <<"Transfers are disabled.">>};
+        _ -> {error, <<"Invalid `transfer-enabled` type.">>}
     end.
 
 transfer_notices(From, Recipient, Quantity, Req, Opts) ->

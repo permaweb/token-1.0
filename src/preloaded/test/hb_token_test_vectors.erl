@@ -299,6 +299,88 @@ basic_transfer_updates_balances_test() ->
         lists:sort([hb_ao:get(<<"action">>, Notice, Opts) || Notice <- Notices])
     ).
 
+transfer_enabled_defaults_to_opts_test() ->
+    Opts = (opts())#{ <<"transfer-enabled">> => false },
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{ initial_balances => #{ Alice => 5 } },
+            Opts
+        ),
+    {ok, Updated} = transfer(Base, Alice, Bob, 1, Opts),
+    ?assertEqual(5, balance(Updated, Alice, Opts)),
+    ?assertEqual(0, balance(Updated, Bob, Opts)),
+    [Notice] = outbox(Updated, Opts),
+    ?assertEqual(Alice, hb_ao:get(<<"target">>, Notice, Opts)),
+    ?assertEqual(<<"Transfers are disabled.">>, hb_ao:get(<<"reason">>, Notice, Opts)).
+
+transfer_enabled_state_overrides_opts_test() ->
+    Opts = (opts())#{ <<"transfer-enabled">> => false },
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 5 },
+                extra => #{ <<"transfer-enabled">> => true }
+            },
+            Opts
+        ),
+    {ok, Updated} = transfer(Base, Alice, Bob, 1, Opts),
+    ?assertEqual(4, balance(Updated, Alice, Opts)),
+    ?assertEqual(1, balance(Updated, Bob, Opts)).
+
+transfer_disabled_state_rejects_transfer_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 5 },
+                extra => #{ <<"transfer-enabled">> => false }
+            },
+            Opts
+        ),
+    {ok, Updated} = transfer(Base, Alice, Bob, 1, Opts),
+    ?assertEqual(5, balance(Updated, Alice, Opts)),
+    ?assertEqual(0, balance(Updated, Bob, Opts)),
+    [Notice] = outbox(Updated, Opts),
+    ?assertEqual(Alice, hb_ao:get(<<"target">>, Notice, Opts)),
+    ?assertEqual(<<"Transfers are disabled.">>, hb_ao:get(<<"reason">>, Notice, Opts)).
+
+set_authority_can_toggle_transfer_enabled_test() ->
+    Opts = opts(),
+    Setter = id(<<"setter">>),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 5 },
+                extra =>
+                    #{
+                        <<"set-authority">> => Setter,
+                        <<"transfer-enabled">> => false,
+                        <<"whitelisted-fields">> => [<<"transfer-enabled">>]
+                    }
+            },
+            Opts
+        ),
+    {ok, StillDisabled} = transfer(Base, Alice, Bob, 1, Opts),
+    ?assertEqual(5, balance(StillDisabled, Alice, Opts)),
+    {ok, Enabled} =
+        set_field(Base, Setter, #{ <<"transfer-enabled">> => true }, Opts),
+    {ok, Transferred} = transfer(Enabled, Alice, Bob, 1, Opts),
+    ?assertEqual(4, balance(Transferred, Alice, Opts)),
+    ?assertEqual(1, balance(Transferred, Bob, Opts)),
+    {ok, DisabledAgain} =
+        set_field(Transferred, Setter, #{ <<"transfer-enabled">> => false }, Opts),
+    {ok, Rejected} = transfer(DisabledAgain, Alice, Bob, 1, Opts),
+    ?assertEqual(4, balance(Rejected, Alice, Opts)),
+    ?assertEqual(1, balance(Rejected, Bob, Opts)).
+
 mixed_case_transfer_updates_canonical_balances_test() ->
     Opts = opts(),
     Alice = id(<<"Alice">>),
