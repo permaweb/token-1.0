@@ -7,14 +7,10 @@
 
 opts() ->
     hb:init(),
-    {ok, Config} = hb_opts:load("config.json", #{}),
-    Config#{
+    #{
         <<"priv-wallet">> => ar_wallet:new(),
-        <<"store">> => [hb_test_utils:test_store() | default_stores()]
+        <<"store">> => [hb_test_utils:test_store()]
     }.
-
-default_stores() ->
-    hb_opts:get(store, [], hb_opts:default_message()).
 
 id(Bin) when is_binary(Bin) ->
     BitSize = byte_size(Bin) * 8,
@@ -24,7 +20,7 @@ id(Other) ->
     hb_util:human_id(Other).
 
 account_key(Account) ->
-    hb_util:to_lower(Account).
+    hb_util:account_key(Account).
 
 canonical_balances(Balances) ->
     maps:fold(
@@ -493,6 +489,33 @@ fixed_supply_without_mint_device_cannot_mint_test() ->
     ?assertEqual(1, balance(MintRejected, Owner, Opts)),
     ?assertEqual(0, balance(MintRejected, Minter, Opts)),
     ?assertEqual(1, hb_ao:get(<<"total-supply">>, MintRejected, Opts)).
+
+mint_authority_mint_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority
+                    }
+            },
+            Opts
+        ),
+    {ok, Minted} = mint(Base, Authority, Recipient, 7, Opts),
+    [Notice] = outbox(Minted, Opts),
+    ?assertEqual(1, balance(Minted, Authority, Opts)),
+    ?assertEqual(7, balance(Minted, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, Minted, Opts)),
+    ?assertEqual(<<"Mint-Notice">>, hb_ao:get(<<"action">>, Notice, Opts)),
+    ?assertEqual(Recipient, hb_ao:get(<<"target">>, Notice, Opts)),
+    ?assertEqual(Recipient, hb_ao:get(<<"recipient">>, Notice, Opts)),
+    ?assertEqual(7, hb_ao:get(<<"quantity">>, Notice, Opts)).
 
 fixed_supply_name_token_flow_test() ->
     Opts = opts(),

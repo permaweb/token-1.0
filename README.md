@@ -31,17 +31,19 @@ signer=vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0
 HB_CONFIG=config.json rebar3 device local
 ```
 
-`config.json` pins the published `process-outbox@1.0` and `security@1.0` implementations through
-HyperBEAM's `trusted-devices` runtime map.
+`config.json` pins the published `mint-authority@1.0`, `process-outbox@1.0`,
+and `security@1.0` implementations through HyperBEAM's `trusted-devices` runtime map.
 
 src:
 
 * https://github.com/permaweb/process-outbox-1.0
 * https://github.com/permaweb/security-1.0
+* https://github.com/permaweb/mint-authority
 
 ```json
 {
   "trusted-devices": {
+    "mint-authority@1.0": "CMZEmkcHengcoDdM_eK2inBmXHpBkm2iPIiw-r6XQPs",
     "process-outbox@1.0": "HOcPV7wxMHYb3rSQ3EfykQhHx_b8waRWhXolhcBNgHo",
     "security@1.0": "ARgymad5oYZcWPpxuV-A9hoSgmm4ElgPIvxMwmeh674"
   }

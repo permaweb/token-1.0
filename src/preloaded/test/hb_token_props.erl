@@ -10,24 +10,13 @@
 -define(MAX_TRANSFER_AMOUNT, 1_000_000_000_000_000_000 div 5).
 -define(NODE_WALLET_CACHE_KEY, {?MODULE, node_wallet}).
 -define(IDENTITIES_CACHE_KEY, {?MODULE, identities}).
--define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
--define(PROCESS_OUTBOX_IMPL, <<"HOcPV7wxMHYb3rSQ3EfykQhHx_b8waRWhXolhcBNgHo">>).
--define(SECURITY_DEVICE, <<"security@1.0">>).
--define(SECURITY_IMPL, <<"ARgymad5oYZcWPpxuV-A9hoSgmm4ElgPIvxMwmeh674">>).
 
 opts() ->
     hb:init(),
     #{
         <<"load-remote-devices">> => false,
-        <<"trusted-devices">> => #{
-            ?PROCESS_OUTBOX_DEVICE => ?PROCESS_OUTBOX_IMPL,
-            ?SECURITY_DEVICE => ?SECURITY_IMPL
-        },
-        <<"store">> => [hb_test_utils:test_store() | default_stores()]
+        <<"store">> => [hb_test_utils:test_store()]
     }.
-
-default_stores() ->
-    hb_opts:get(store, [], hb_opts:default_message()).
 
 simulate_native_token_test_() ->
     {timeout, 120, fun simulate_native_token/0}.
@@ -394,4 +383,4 @@ canonical_balances(Balances) ->
     ).
 
 account_key(Account) when is_binary(Account) ->
-    hb_util:to_lower(Account).
+    hb_util:account_key(Account).

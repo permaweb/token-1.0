@@ -489,7 +489,7 @@ normalize_without_root(RootProc, Procs) ->
     maps:without([hb_message:id(RootProc, all)], normalize_env(Procs)).
 
 account_key(Account) when is_binary(Account) ->
-    hb_util:to_lower(Account).
+    hb_util:account_key(Account).
 
 canonical_balances(Balances) ->
     lists:foldl(
