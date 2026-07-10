@@ -3,19 +3,12 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("hb/include/hb.hrl").
 
--define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
--define(PROCESS_OUTBOX_IMPL, <<"HOcPV7wxMHYb3rSQ3EfykQhHx_b8waRWhXolhcBNgHo">>).
--define(SECURITY_DEVICE, <<"security@1.0">>).
--define(SECURITY_IMPL, <<"ARgymad5oYZcWPpxuV-A9hoSgmm4ElgPIvxMwmeh674">>).
+-define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>). 
 
 opts() ->
     hb:init(),
-    #{
-        <<"load-remote-devices">> => false,
-        <<"trusted-devices">> => #{
-            ?PROCESS_OUTBOX_DEVICE => ?PROCESS_OUTBOX_IMPL,
-            ?SECURITY_DEVICE => ?SECURITY_IMPL
-        },
+    {ok, Config} = hb_opts:load("config.json", #{}),
+    Config#{
         <<"priv-wallet">> => ar_wallet:new(),
         <<"store">> => [hb_test_utils:test_store() | default_stores()]
     }.
