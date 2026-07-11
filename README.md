@@ -4,8 +4,8 @@
 
 ```sh
 rebar3 compile
-rebar3 device verify
-rebar3 device package
+rebar3 device verify --device-src=src,_build/default/lib/hb/src/preloaded/token
+rebar3 device package --device-src=src,_build/default/lib/hb/src/preloaded/token
 ```
 
 ## test
@@ -76,7 +76,7 @@ calls the token device against the raw published item and bypasses
 ## publish
 
 ```sh
-rebar3 device publish --key wallet.json
+rebar3 device publish --device-src=src,_build/default/lib/hb/src/preloaded/token --key wallet.json
 ```
 
 ## License

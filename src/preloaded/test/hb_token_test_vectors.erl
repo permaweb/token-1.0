@@ -6,6 +6,7 @@
 -define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>). 
 
 opts() ->
+    ensure_lib_token(),
     hb:init(),
     #{
         <<"priv-wallet">> => ar_wallet:new(),
@@ -20,7 +21,46 @@ id(Other) ->
     hb_util:human_id(Other).
 
 account_key(Account) ->
-    hb_util:account_key(Account).
+    hb_util:to_lower(Account).
+
+ensure_lib_token() ->
+    case code:ensure_loaded(lib_token) of
+        {module, lib_token} ->
+            ok;
+        {error, _} ->
+            Source = lib_token_source(),
+            case compile:file(
+                Source,
+                [
+                    debug_info,
+                    binary,
+                    {i, "src"},
+                    {i, "_build/default/lib/hb/src"},
+                    {i, "_build/default/lib/hb/include"}
+                ]
+            ) of
+                {ok, lib_token, Beam} ->
+                    case code:load_binary(lib_token, Source, Beam) of
+                        {module, lib_token} -> ok;
+                        {error, already_loaded} -> ok;
+                        Other -> erlang:error({lib_token_load_failed, Other})
+                    end;
+                Other ->
+                    erlang:error({lib_token_compile_failed, Other})
+            end
+    end.
+
+lib_token_source() ->
+    Candidates =
+        [filename:join(["_build/default/lib/hb", "src", "preloaded", "token", "lib_token.erl"])] ++
+            case code:lib_dir(hb) of
+                {error, _} -> [];
+                HBDir -> [filename:join([HBDir, "src", "preloaded", "token", "lib_token.erl"])]
+            end,
+    case lists:dropwhile(fun(Path) -> not filelib:is_regular(Path) end, Candidates) of
+        [Path | _] -> Path;
+        [] -> filename:join(["_build/default/lib/hb", "src", "preloaded", "token", "lib_token.erl"])
+    end.
 
 canonical_balances(Balances) ->
     maps:fold(
@@ -380,6 +420,37 @@ set_authority_can_toggle_transfer_enabled_test() ->
     {ok, Rejected} = transfer(DisabledAgain, Alice, Bob, 1, Opts),
     ?assertEqual(4, balance(Rejected, Alice, Opts)),
     ?assertEqual(1, balance(Rejected, Bob, Opts)).
+
+set_authority_m_of_n_can_toggle_transfer_enabled_test() ->
+    Opts = opts(),
+    AdminA = id(<<"admin-a">>),
+    AdminB = id(<<"admin-b">>),
+    AdminC = id(<<"admin-c">>),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 5 },
+                extra =>
+                    #{
+                        <<"set-authority">> => [AdminA, AdminB, AdminC],
+                        <<"set-authority-match">> => 2,
+                        <<"transfer-enabled">> => false,
+                        <<"whitelisted-fields">> => [<<"transfer-enabled">>]
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Too few acceptable committers present.">>},
+        set_field(Base, AdminA, #{ <<"transfer-enabled">> => true }, Opts)
+    ),
+    {ok, Enabled} =
+        set_field(Base, [AdminA, AdminB], #{ <<"transfer-enabled">> => true }, Opts),
+    {ok, Transferred} = transfer(Enabled, Alice, Bob, 1, Opts),
+    ?assertEqual(4, balance(Transferred, Alice, Opts)),
+    ?assertEqual(1, balance(Transferred, Bob, Opts)).
 
 mixed_case_transfer_updates_canonical_balances_test() ->
     Opts = opts(),

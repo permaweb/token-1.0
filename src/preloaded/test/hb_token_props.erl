@@ -12,11 +12,51 @@
 -define(IDENTITIES_CACHE_KEY, {?MODULE, identities}).
 
 opts() ->
+    ensure_lib_token(),
     hb:init(),
     #{
         <<"load-remote-devices">> => false,
         <<"store">> => [hb_test_utils:test_store()]
     }.
+
+ensure_lib_token() ->
+    case code:ensure_loaded(lib_token) of
+        {module, lib_token} ->
+            ok;
+        {error, _} ->
+            Source = lib_token_source(),
+            case compile:file(
+                Source,
+                [
+                    debug_info,
+                    binary,
+                    {i, "src"},
+                    {i, "_build/default/lib/hb/src"},
+                    {i, "_build/default/lib/hb/include"}
+                ]
+            ) of
+                {ok, lib_token, Beam} ->
+                    case code:load_binary(lib_token, Source, Beam) of
+                        {module, lib_token} -> ok;
+                        {error, already_loaded} -> ok;
+                        Other -> erlang:error({lib_token_load_failed, Other})
+                    end;
+                Other ->
+                    erlang:error({lib_token_compile_failed, Other})
+            end
+    end.
+
+lib_token_source() ->
+    Candidates =
+        [filename:join(["_build/default/lib/hb", "src", "preloaded", "token", "lib_token.erl"])] ++
+            case code:lib_dir(hb) of
+                {error, _} -> [];
+                HBDir -> [filename:join([HBDir, "src", "preloaded", "token", "lib_token.erl"])]
+            end,
+    case lists:dropwhile(fun(Path) -> not filelib:is_regular(Path) end, Candidates) of
+        [Path | _] -> Path;
+        [] -> filename:join(["_build/default/lib/hb", "src", "preloaded", "token", "lib_token.erl"])
+    end.
 
 simulate_native_token_test_() ->
     {timeout, 120, fun simulate_native_token/0}.
@@ -383,4 +423,4 @@ canonical_balances(Balances) ->
     ).
 
 account_key(Account) when is_binary(Account) ->
-    hb_util:account_key(Account).
+    hb_util:to_lower(Account).

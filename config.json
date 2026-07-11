@@ -1,7 +1,7 @@
 {
   "trusted-devices": {
-    "mint-authority@1.0": "XA1wCvULJ4v70tfP9Jd79bTENhyFfsK8isGSaTHc9qA",
+    "mint-authority@1.0": "kR-AuG3o2-o10VF-QfTgMLGsP1uPo5ezE9VeE4EjbyU",
     "process-outbox@1.0": "HOcPV7wxMHYb3rSQ3EfykQhHx_b8waRWhXolhcBNgHo",
-    "security@1.0": "ARgymad5oYZcWPpxuV-A9hoSgmm4ElgPIvxMwmeh674"
+    "security@1.0": "b7Vxz1lKhQgMQYXPizAc3N3bFMU8h8U5meoECG265qc"
   }
 }

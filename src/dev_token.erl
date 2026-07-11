@@ -9,6 +9,7 @@
 -include_lib("hb/include/hb.hrl").
 
 -implements(<<"token@1.0">>).
+-device_libraries([lib_token]).
 
 -define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
 
@@ -112,7 +113,7 @@ canonicalize_balances(Base, Balances, Opts) ->
     {Changed, FlatBalances} =
         lists:foldl(
             fun(Key, {ChangedAcc, BalancesAcc}) ->
-                Account = hb_util:account_key(Key),
+                Account = lib_token:account_key(Key),
                 {ok, Amount} = hb_ao:resolve(Balances, Key, Opts),
                 {
                     ChangedAcc
@@ -211,8 +212,8 @@ handle_action(Action, Base, Req, Opts) ->
 balance(Base, Req, Opts) ->
     maybe
         {ok, Account0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
-        true ?= hb_util:validate_address(Account0, [], Opts),
-        Account = hb_util:account_key(Account0),
+        true ?= lib_token:validate_address(Account0, [], Opts),
+        Account = lib_token:account_key(Account0),
         ?event(
             debug_token,
             {balance_request,
@@ -261,10 +262,10 @@ transfer(Base, Assignment, Opts) ->
         {ok, Quantity} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
         true ?= transfer_enabled(Base, Opts),
         % validate From/Recipient sanity
-        true ?= hb_util:validate_address(From0, [], Opts),
-        true ?= hb_util:validate_address(Recipient0, [], Opts),
-        From = hb_util:account_key(From0),
-        Recipient = hb_util:account_key(Recipient0),
+        true ?= lib_token:validate_address(From0, [], Opts),
+        true ?= lib_token:validate_address(Recipient0, [], Opts),
+        From = lib_token:account_key(From0),
+        Recipient = lib_token:account_key(Recipient0),
         % Normalize the base's minting state for the sender.
         {ok, NormBase} ?=
             normalize_mint(
@@ -377,12 +378,12 @@ mint(Base, Assignment, Opts) ->
                     as_mint_device(<<"mint">>, Base, Assignment, Opts);
                 {ok, Subject} ->
                     maybe
-                        true ?= hb_util:validate_address(Subject, [], Opts),
+                        true ?= lib_token:validate_address(Subject, [], Opts),
                         MintReq1 =
                             hb_ao:set(
                                 Assignment,
                                 <<"subject">>,
-                                hb_util:account_key(Subject),
+                                lib_token:account_key(Subject),
                                 Opts
                             ),
                         as_mint_device(<<"mint">>, Base, MintReq1, Opts)
