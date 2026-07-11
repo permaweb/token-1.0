@@ -113,14 +113,23 @@ canonicalize_balances(Base, Balances, Opts) ->
     {Changed, FlatBalances} =
         lists:foldl(
             fun(Key, {ChangedAcc, BalancesAcc}) ->
-                Account = lib_token:account_key(Key),
-                {ok, Amount} = hb_ao:resolve(Balances, Key, Opts),
-                {
-                    ChangedAcc
-                        orelse (Account =/= Key)
-                        orelse maps:is_key(Account, BalancesAcc),
-                    add_balance(Account, Amount, BalancesAcc)
-                }
+                case lib_token:validate_address(Key, [], Opts) of
+                    true ->
+                        Account = lib_token:account_key(Key),
+                        case hb_ao:resolve(Balances, Key, Opts) of
+                            {ok, Amount} when is_integer(Amount) ->
+                                {
+                                    ChangedAcc
+                                        orelse (Account =/= Key)
+                                        orelse maps:is_key(Account, BalancesAcc),
+                                    add_balance(Account, Amount, BalancesAcc)
+                                };
+                            _ ->
+                                {ChangedAcc, BalancesAcc}
+                        end;
+                    {error, _} ->
+                        {ChangedAcc, BalancesAcc}
+                end
             end,
             {false, #{}},
             trie_keys(Balances, Opts)
