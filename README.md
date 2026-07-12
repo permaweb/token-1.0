@@ -17,13 +17,13 @@ rebar3 eunit-all
 ## published package
 
 ```bash
-device publish: token@1.0 
+Published device: token@1.0; 
 
-spec=ibZf_Tqk4omTejmBIgCI6HCvp5HWYlgKhjkDMZPh4UY 
+Specification ID: 1L0E5HKuNtcju4Qg8A8l8MsSPOTInLfK4G9w-oLjIRY; 
 
-impl=y8vkutjPnDdfOLP2ISSnj1eOBw9x0jTddgY4dhVpWrQ 
+Implementation ID: CBJEqrdujJE-aNOLjHeYpEQW5Po26ZQqnTHFln4ovIY; 
 
-signer=vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0
+Signer: vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0;
 ```
 ## local node
 
