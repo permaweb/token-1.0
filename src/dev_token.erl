@@ -1,10 +1,17 @@
 %%% @doc A fast, simple implementation of AO token specification.
 %%% Specification: https://cookbook_ao.arweave.net/references/api/token.html
 -module(dev_token).
--export([info/0, compute/3, init/3, normalize/3, snapshot/3, balance/3, mint/3]).
-%%% Non-public device API functions. Note: Ensure that these are not exported
-%%% as publicly callable device keys, either by having arity > 3, or by gating
-%%% the public surface in `info/0`.
+-export([
+    info/0,
+    route/4,
+    compute/3,
+    init/3,
+    normalize/3,
+    snapshot/3,
+    balance/3,
+    mint/3
+]).
+%%% Non-public device API functions. Note: Ensure that these are not exported.
 -export([handle_action/4]).
 -include_lib("hb/include/hb.hrl").
 
@@ -71,19 +78,60 @@ end.
 
 %%% `~process@1.0' interface implementation.
 
-%% @doc Return the public token device API.
+%% @doc Return the public token device API. All resolutions pass through
+%% `route/4' so scheduled assignments cannot use the message-device fallback
+%% to execute a state path directly.
 info() ->
-    #{
-        exports =>
-            [
-                <<"compute">>,
-                <<"init">>,
-                <<"normalize">>,
-                <<"snapshot">>,
-                <<"balance">>,
-                <<"mint">>
-            ]
-    }.
+    #{ handler => fun route/4 }.
+
+%% @doc Route token calls. Scheduler assignments are state transitions and
+%% must enter through exactly `/compute'; lifecycle calls and ordinary reads
+%% retain the existing public device behavior.
+route(Key, Base, Req, Opts) ->
+    case is_assignment(Req, Opts) andalso not is_compute_path(Req, Opts) of
+        true ->
+            ?event(
+                token_short,
+                {ignoring_non_compute_assignment,
+                    {path, hb_path:from_message(request, Req, Opts)}},
+                Opts
+            ),
+            {ok, Base};
+        false ->
+            NormKey = hb_util:to_lower(hb_ao:normalize_key(Key)),
+            route_allowed(NormKey, Key, Base, Req, Opts)
+    end.
+
+route_allowed(<<"compute">>, _Key, Base, Req, Opts) -> compute(Base, Req, Opts);
+route_allowed(<<"init">>, _Key, Base, Req, Opts) -> init(Base, Req, Opts);
+route_allowed(<<"normalize">>, _Key, Base, Req, Opts) -> normalize(Base, Req, Opts);
+route_allowed(<<"snapshot">>, _Key, Base, Req, Opts) -> snapshot(Base, Req, Opts);
+route_allowed(<<"balance">>, _Key, Base, Req, Opts) -> balance(Base, Req, Opts);
+route_allowed(<<"mint">>, _Key, Base, Req, Opts) -> mint(Base, Req, Opts);
+route_allowed(_NormKey, Key, Base, Req, Opts) ->
+    hb_ao:raw(<<"message@1.0">>, Key, Base, Req, Opts).
+
+is_assignment(Req, Opts) ->
+    case hb_maps:get(<<"type">>, Req, undefined, Opts) of
+        undefined ->
+            is_assignment_envelope(Req);
+        Type ->
+            hb_path:matches(Type, <<"assignment">>) orelse
+                is_assignment_envelope(Req)
+    end.
+
+is_assignment_envelope(Req) when is_map(Req) ->
+    maps:is_key(<<"slot">>, Req) andalso
+        maps:is_key(<<"process">>, Req) andalso
+        maps:is_key(<<"body">>, Req);
+is_assignment_envelope(_Req) ->
+    false.
+
+is_compute_path(Req, Opts) ->
+    case hb_path:from_message(request, Req, Opts) of
+        [Path] -> hb_path:matches(Path, <<"compute">>);
+        _ -> false
+    end.
 
 %% @doc Canonicalize account keys in the initial balance trie.
 init(Base, _Req, Opts) ->

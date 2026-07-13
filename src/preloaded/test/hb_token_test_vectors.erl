@@ -203,6 +203,7 @@ mint(State, From, Recipient, Quantity, Opts) ->
         #{
             <<"body">> =>
                 #{
+                    <<"action">> => <<"Mint">>,
                     <<"from">> => From,
                     <<"recipient">> => Recipient,
                     <<"quantity">> => Quantity
@@ -241,6 +242,50 @@ balance_existing_account_test() ->
             Opts
         ),
     ?assertEqual({ok, 7}, public_balance(Base, Alice, Opts)).
+
+scheduled_non_compute_paths_rejected_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Base = token_state(#{ initial_balances => #{ Alice => 7 } }, Opts),
+    lists:foreach(
+        fun(Path) ->
+            {ok, Ignored} =
+                hb_ao:resolve(
+                    Base,
+                    #{
+                        <<"path">> => Path,
+                        <<"type">> => <<"Assignment">>,
+                        <<"slot">> => 0,
+                        <<"body">> => #{}
+                    },
+                    Opts
+                ),
+            ?assertEqual(7, balance(Ignored, Alice, Opts)),
+            ?assertEqual(7, hb_ao:get(<<"total-supply">>, Ignored, Opts))
+        end,
+        [<<"mint">>, <<"balances">>, <<"compute/balances">>]
+    ),
+    {ok, IgnoredEnvelope} =
+        hb_ao:resolve(
+            Base,
+            #{
+                <<"path">> => <<"mint">>,
+                <<"slot">> => 0,
+                <<"process">> => id(<<"process">>),
+                <<"body">> => #{}
+            },
+            Opts
+        ),
+    ?assertEqual(7, balance(IgnoredEnvelope, Alice, Opts)),
+    ?assertMatch({ok, _}, hb_ao:resolve(Base, <<"balances">>, Opts)),
+    ?assertEqual(
+        {ok, 7},
+        hb_ao:resolve(
+            Base,
+            #{ <<"path">> => <<"balance">>, <<"balance">> => Alice },
+            Opts
+        )
+    ).
 
 mixed_case_initial_balance_uses_canonical_account_test() ->
     Opts = opts(),
@@ -669,6 +714,45 @@ mint_authority_mint_test() ->
     ?assertEqual(Recipient, hb_ao:get(<<"target">>, Notice, Opts)),
     ?assertEqual(Recipient, hb_ao:get(<<"recipient">>, Notice, Opts)),
     ?assertEqual(7, hb_ao:get(<<"quantity">>, Notice, Opts)).
+
+mint_authority_requires_mint_body_action_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority
+                    }
+            },
+            Opts
+        ),
+    Body =
+        #{
+            <<"from">> => Authority,
+            <<"recipient">> => Recipient,
+            <<"quantity">> => 7
+        },
+    ?assertEqual(
+        {error, <<"Invalid mint action.">>},
+        dev_token:handle_action(<<"mint">>, Base, #{ <<"body">> => Body }, Opts)
+    ),
+    ?assertEqual(
+        {error, <<"Invalid mint action.">>},
+        dev_token:handle_action(
+            <<"mint">>,
+            Base,
+            #{ <<"body">> => Body#{ <<"action">> => <<"Transfer">> } },
+            Opts
+        )
+    ),
+    ?assertEqual(0, balance(Base, Recipient, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)).
 
 fixed_supply_name_token_flow_test() ->
     Opts = opts(),
