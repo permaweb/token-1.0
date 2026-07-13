@@ -715,6 +715,120 @@ mint_authority_mint_test() ->
     ?assertEqual(Recipient, hb_ao:get(<<"recipient">>, Notice, Opts)),
     ?assertEqual(7, hb_ao:get(<<"quantity">>, Notice, Opts)).
 
+mint_enabled_defaults_to_opts_test() ->
+    Opts = (opts())#{ <<"mint-enabled">> => false },
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Minting is disabled.">>},
+        mint(Base, Authority, Recipient, 7, Opts)
+    ),
+    ?assertEqual(0, balance(Base, Recipient, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)).
+
+mint_enabled_state_overrides_opts_test() ->
+    Opts = (opts())#{ <<"mint-enabled">> => false },
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"mint-enabled">> => true
+                    }
+            },
+            Opts
+        ),
+    {ok, Minted} = mint(Base, Authority, Recipient, 7, Opts),
+    ?assertEqual(7, balance(Minted, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, Minted, Opts)).
+
+set_authority_can_toggle_mint_enabled_test() ->
+    Opts = opts(),
+    Setter = id(<<"setter">>),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"mint-enabled">> => false,
+                        <<"set-authority">> => Setter,
+                        <<"whitelisted-fields">> => [<<"mint-enabled">>]
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Minting is disabled.">>},
+        mint(Base, Authority, Recipient, 7, Opts)
+    ),
+    ?assertEqual(
+        {error, <<"Too few acceptable committers present.">>},
+        set_field(Base, Authority, #{ <<"mint-enabled">> => true }, Opts)
+    ),
+    {ok, Enabled} =
+        set_field(Base, Setter, #{ <<"mint-enabled">> => true }, Opts),
+    {ok, Minted} = mint(Enabled, Authority, Recipient, 7, Opts),
+    ?assertEqual(7, balance(Minted, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, Minted, Opts)),
+    {ok, Disabled} =
+        set_field(Minted, Setter, #{ <<"mint-enabled">> => false }, Opts),
+    ?assertEqual(
+        {error, <<"Minting is disabled.">>},
+        mint(Disabled, Authority, Recipient, 3, Opts)
+    ),
+    ?assertEqual(7, balance(Disabled, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, Disabled, Opts)).
+
+invalid_mint_enabled_type_fails_closed_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"mint-enabled">> => <<"true">>
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Invalid `mint-enabled` type.">>},
+        mint(Base, Authority, Recipient, 7, Opts)
+    ),
+    ?assertEqual(0, balance(Base, Recipient, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)).
+
 mint_authority_requires_mint_body_action_test() ->
     Opts = opts(),
     Authority = id(<<"authority">>),

@@ -426,6 +426,12 @@ transfer_notices(From, Recipient, Quantity, Req, Opts) ->
 %% `body.subject`, hoist it to the top-level request shape expected by the mint
 %% device before dispatch.
 mint(Base, Assignment, Opts) ->
+    case mint_enabled(Base, Opts) of
+        true -> mint_request(Base, Assignment, Opts);
+        Error -> Error
+    end.
+
+mint_request(Base, Assignment, Opts) ->
     case hb_ao:resolve(Assignment, <<"body">>, Opts) of
         {error, _} ->
             as_mint_device(<<"mint">>, Base, Assignment, Opts);
@@ -446,6 +452,14 @@ mint(Base, Assignment, Opts) ->
                         as_mint_device(<<"mint">>, Base, MintReq1, Opts)
                     end
             end
+    end.
+
+mint_enabled(Base, Opts) ->
+    Default = hb_opts:get(<<"mint-enabled">>, true, Opts),
+    case hb_ao:get(<<"mint-enabled">>, Base, Default, Opts) of
+        true -> true;
+        false -> {error, <<"Minting is disabled.">>};
+        _ -> {error, <<"Invalid `mint-enabled` type.">>}
     end.
 
 %% @doc Execute the mint device's main key, but return the state in its 

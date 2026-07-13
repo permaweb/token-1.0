@@ -334,6 +334,112 @@ wallet_only_mint_authority_through_scheduler() ->
     ?assertEqual(7, balance(Minted, Recipient, Opts)),
     ?assertEqual(8, state_field(Minted, <<"total-supply">>, 0, Opts)).
 
+mint_enabled_council_control_through_scheduler_test_() ->
+    {timeout, 120, fun mint_enabled_council_control_through_scheduler/0}.
+
+mint_enabled_council_control_through_scheduler() ->
+    Opts = opts(),
+    {AdminA, AdminAWallet} = signer(),
+    {AdminB, AdminBWallet} = signer(),
+    {AdminC, _AdminCWallet} = signer(),
+    {MintAuthority, MintAuthorityWallet} = signer(),
+    {Recipient, _RecipientWallet} = signer(),
+    Process0 =
+        dev_token_lib:ledger(
+            #{
+                <<"execution-device">> => <<"token@1.0">>,
+                <<"security-device">> => <<"security@1.0">>,
+                <<"authority">> => [],
+                <<"mint-device">> => <<"mint-authority@1.0">>,
+                <<"mint-authority">> => MintAuthority,
+                <<"mint-enabled">> => false,
+                <<"set-authority">> => [AdminA, AdminB, AdminC],
+                <<"set-authority-match">> => 2,
+                <<"whitelisted-fields">> => [<<"mint-enabled">>],
+                <<"balances">> => #{ MintAuthority => 1 },
+                <<"total-supply">> => 1
+            },
+            Opts
+        ),
+    MintRequest =
+        #{
+            <<"action">> => <<"Mint">>,
+            <<"mode">> => <<"single">>,
+            <<"recipient">> => Recipient,
+            <<"quantity">> => 7
+        },
+    {0, DisabledMint} =
+        schedule_and_compute(
+            Process0,
+            MintRequest,
+            MintAuthorityWallet,
+            MintAuthorityWallet,
+            Opts
+        ),
+    ?assertEqual(0, balance(DisabledMint, Recipient, Opts)),
+    ?assertEqual(1, state_field(DisabledMint, <<"total-supply">>, 0, Opts)),
+    {1, SingleSignerSet} =
+        schedule_and_compute(
+            DisabledMint,
+            #{
+                <<"action">> => <<"Set">>,
+                <<"mint-enabled">> => true,
+                <<"timestamp">> => 1
+            },
+            AdminAWallet,
+            AdminAWallet,
+            Opts
+        ),
+    ?assertEqual(
+        false,
+        state_field(SingleSignerSet, <<"mint-enabled">>, not_found, Opts)
+    ),
+    {2, Enabled} =
+        schedule_and_compute(
+            SingleSignerSet,
+            #{
+                <<"action">> => <<"Set">>,
+                <<"mint-enabled">> => true,
+                <<"timestamp">> => 2
+            },
+            [AdminAWallet, AdminBWallet],
+            AdminAWallet,
+            Opts
+        ),
+    ?assertEqual(true, state_field(Enabled, <<"mint-enabled">>, not_found, Opts)),
+    {3, Minted} =
+        schedule_and_compute(
+            Enabled,
+            MintRequest,
+            MintAuthorityWallet,
+            MintAuthorityWallet,
+            Opts
+        ),
+    ?assertEqual(7, balance(Minted, Recipient, Opts)),
+    ?assertEqual(8, state_field(Minted, <<"total-supply">>, 0, Opts)),
+    {4, DisabledAgain} =
+        schedule_and_compute(
+            Minted,
+            #{
+                <<"action">> => <<"Set">>,
+                <<"mint-enabled">> => false,
+                <<"timestamp">> => 3
+            },
+            [AdminAWallet, AdminBWallet],
+            AdminAWallet,
+            Opts
+        ),
+    {5, RejectedAgain} =
+        schedule_and_compute(
+            DisabledAgain,
+            MintRequest#{ <<"quantity">> => 3 },
+            MintAuthorityWallet,
+            MintAuthorityWallet,
+            Opts
+        ),
+    ?assertEqual(7, balance(RejectedAgain, Recipient, Opts)),
+    ?assertEqual(8, state_field(RejectedAgain, <<"total-supply">>, 0, Opts)).
+
 delegated_action_allowlist_through_scheduler_test_() ->
     {timeout, 120, fun delegated_action_allowlist_through_scheduler/0}.
 
