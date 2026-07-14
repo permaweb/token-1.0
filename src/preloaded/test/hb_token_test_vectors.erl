@@ -102,6 +102,20 @@ token_state(Params, Opts) ->
         ),
     hb_message:commit(Base, Opts).
 
+raw_token_state(Fields, Opts) ->
+    hb_message:commit(
+        maps:merge(
+            #{
+                <<"device">> => <<"token@1.0">>,
+                <<"name">> => <<"Test Token">>,
+                <<"ticker">> => <<"TEST">>,
+                <<"denomination">> => 0
+            },
+            Fields
+        ),
+        Opts
+    ).
+
 balance(State, Account, Opts) ->
     Balances = hb_ao:get(<<"balances">>, State, Opts),
     case hb_ao:resolve(Balances, account_key(Account), Opts) of
@@ -334,17 +348,13 @@ init_canonicalizes_raw_initial_balances_test() ->
     {ok, RawBalances} =
         hb_ao:resolve(
             #{ <<"device">> => <<"trie@1.0">> },
-            #{ Alice => 7, <<"path">> => <<"set">> },
+            #{ Alice => 7, account_key(Alice) => 3, <<"path">> => <<"set">> },
             Opts
         ),
     Base =
-        hb_message:commit(
+        raw_token_state(
             #{
-                <<"device">> => <<"token@1.0">>,
-                <<"name">> => <<"Test Token">>,
-                <<"ticker">> => <<"TEST">>,
-                <<"denomination">> => 0,
-                <<"total-supply">> => 7,
+                <<"total-supply">> => 10,
                 <<"balances">> => RawBalances
             },
             Opts
@@ -352,8 +362,77 @@ init_canonicalizes_raw_initial_balances_test() ->
     {ok, Initialized} = dev_token:init(Base, #{}, Opts),
     Balances = hb_ao:get(<<"balances">>, Initialized, Opts),
     ?assertEqual({error, not_found}, hb_ao:resolve(Balances, Alice, Opts)),
-    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, account_key(Alice), Opts)),
-    ?assertEqual({ok, 7}, public_balance(Initialized, Alice, Opts)).
+    ?assertEqual({ok, 10}, hb_ao:resolve(Balances, account_key(Alice), Opts)),
+    ?assertEqual({ok, 10}, public_balance(Initialized, Alice, Opts)).
+
+init_rejects_invalid_initial_balances_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    MixedAlice = id(<<"Alice">>),
+    Bob = id(<<"bob">>),
+    Cases =
+        [
+            {
+                #{ Alice => 100, Bob => -90 },
+                10,
+                <<"Balance amounts must be non-negative integers.">>
+            },
+            {
+                #{ MixedAlice => 7, Bob => <<"3">> },
+                10,
+                <<"Balance amounts must be non-negative integers.">>
+            },
+            {
+                #{ MixedAlice => 7, <<" invalid">> => 3 },
+                10,
+                <<"Address cannot contain path separators or whitespaces">>
+            }
+        ],
+    lists:foreach(
+        fun({Balances, TotalSupply, Error}) ->
+            Base =
+                raw_token_state(
+                    #{
+                        <<"balances">> => Balances,
+                        <<"total-supply">> => TotalSupply
+                    },
+                    Opts
+                ),
+            ?assertEqual({error, Error}, dev_token:init(Base, #{}, Opts))
+        end,
+        Cases
+    ).
+
+init_rejects_invalid_total_supply_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Balances = #{ Alice => 7 },
+    lists:foreach(
+        fun(TotalSupply) ->
+            Base =
+                raw_token_state(
+                    #{
+                        <<"balances">> => Balances,
+                        <<"total-supply">> => TotalSupply
+                    },
+                    Opts
+                ),
+            ?assertEqual(
+                {error, <<"Total supply must be a non-negative integer.">>},
+                dev_token:init(Base, #{}, Opts)
+            )
+        end,
+        [-1, <<"7">>]
+    ),
+    Mismatched =
+        raw_token_state(
+            #{ <<"balances">> => Balances, <<"total-supply">> => 6 },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Total supply does not match balances.">>},
+        dev_token:init(Mismatched, #{}, Opts)
+    ).
 
 balance_missing_account_returns_zero_test() ->
     Opts = opts(),

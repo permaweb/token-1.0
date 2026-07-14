@@ -133,7 +133,7 @@ is_compute_path(Req, Opts) ->
         _ -> false
     end.
 
-%% @doc Canonicalize account keys in the initial balance trie.
+%% @doc Validate initial supply and canonicalize account keys.
 init(Base, _Req, Opts) ->
     canonicalize_balances(Base, Opts).
 
@@ -146,53 +146,60 @@ snapshot(Base, _Req, _Opts) ->
     {ok, Base}.
 
 canonicalize_balances(Base, Opts) ->
-    case hb_maps:get(<<"balances">>, Base, not_found, Opts) of
-        not_found ->
-            {ok, Base};
-        Balances0 ->
-            Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
-            case is_map(Balances) of
-                true -> canonicalize_balances(Base, Balances, Opts);
-                false -> {ok, Base}
-            end
+    maybe
+        Balances0 = hb_maps:get(<<"balances">>, Base, not_found, Opts),
+        true ?= (Balances0 =/= not_found) orelse
+            {error, <<"Balances not found.">>},
+        Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
+        true ?= is_map(Balances) orelse
+            {error, <<"Balances must be a map.">>},
+        canonicalize_balances(Base, Balances, Opts)
     end.
 
 canonicalize_balances(Base, Balances, Opts) ->
-    {Changed, FlatBalances} =
-        lists:foldl(
-            fun(Key, {ChangedAcc, BalancesAcc}) ->
-                case lib_token:validate_address(Key, [], Opts) of
-                    true ->
-                        Account = lib_token:account_key(Key),
-                        case hb_ao:resolve(Balances, Key, Opts) of
-                            {ok, Amount} when is_integer(Amount) ->
-                                {
-                                    ChangedAcc
-                                        orelse (Account =/= Key)
-                                        orelse maps:is_key(Account, BalancesAcc),
-                                    add_balance(Account, Amount, BalancesAcc)
-                                };
-                            _ ->
-                                {ChangedAcc, BalancesAcc}
-                        end;
-                    {error, _} ->
-                        {ChangedAcc, BalancesAcc}
-                end
-            end,
-            {false, #{}},
-            trie_keys(Balances, Opts)
-        ),
-    case Changed of
-        false ->
-            {ok, Base};
-        true ->
-            {ok, NewBalances} =
-                hb_ao:resolve(
-                    #{<<"device">> => <<"trie@1.0">>},
-                    FlatBalances#{<<"path">> => <<"set">>},
-                    Opts
-                ),
-            {ok, hb_maps:put(<<"balances">>, NewBalances, Base, Opts)}
+    maybe
+        TotalSupply = hb_ao:get(<<"total-supply">>, Base, not_found, Opts),
+        true ?= (is_integer(TotalSupply) andalso TotalSupply >= 0) orelse
+            {error, <<"Total supply must be a non-negative integer.">>},
+        {ok, Changed, FlatBalances} ?=
+            lists:foldl(
+                fun
+                    (_Key, {error, _} = Error) ->
+                        Error;
+                    (Key, {ok, ChangedAcc, BalancesAcc}) ->
+                        maybe
+                            true ?= lib_token:validate_address(Key, [], Opts),
+                            {ok, Amount} ?= hb_ao:resolve(Balances, Key, Opts),
+                            true ?=
+                                (is_integer(Amount) andalso Amount >= 0) orelse
+                                    {error, <<"Balance amounts must be non-negative integers.">>},
+                            Account = lib_token:account_key(Key),
+                            {
+                                ok,
+                                ChangedAcc
+                                    orelse (Account =/= Key)
+                                    orelse maps:is_key(Account, BalancesAcc),
+                                add_balance(Account, Amount, BalancesAcc)
+                            }
+                        end
+                end,
+                {ok, false, #{}},
+                trie_keys(Balances, Opts)
+            ),
+        true ?= (lists:sum(maps:values(FlatBalances)) =:= TotalSupply) orelse
+            {error, <<"Total supply does not match balances.">>},
+        case Changed of
+            false ->
+                {ok, Base};
+            true ->
+                {ok, NewBalances} =
+                    hb_ao:resolve(
+                        #{<<"device">> => <<"trie@1.0">>},
+                        FlatBalances#{<<"path">> => <<"set">>},
+                        Opts
+                    ),
+                {ok, hb_maps:put(<<"balances">>, NewBalances, Base, Opts)}
+        end
     end.
 
 %% @doc Entrypoint for computations on token processes. Deduplicates by signed

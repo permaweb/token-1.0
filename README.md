@@ -14,6 +14,12 @@ rebar3 device package --device-src=src,_build/default/lib/hb/src/preloaded/token
 HB_PORT=0 rebar3 device test
 rebar3 eunit-all
 ```
+
+## genesis
+
+Initialization requires valid addresses with non-negative integer balances and a
+non-negative `total-supply` equal to their sum. Invalid genesis state fails closed.
+
 ## published package
 
 ```bash

@@ -199,12 +199,23 @@ generate_identities(Users) ->
 generate_ledger(Opts) ->
     Extras = hb_opts:get(<<"spawn-extras">>, #{}, Opts),
     BalanceKey = balance_key(Extras, Opts),
+    InitialBalances = generate_initial_balances(Opts),
+    LedgerFields = Extras#{
+        BalanceKey => InitialBalances,
+        <<"ledger-nonce">> => hb_invariant:int(small)
+    },
+    InitializedFields =
+        case BalanceKey of
+            <<"balances">> ->
+                LedgerFields#{
+                    <<"total-supply">> => lists:sum(maps:values(InitialBalances))
+                };
+            _ ->
+                LedgerFields
+        end,
     Ledger =
         dev_token_lib:ledger(
-            Extras#{
-                BalanceKey => generate_initial_balances(Opts),
-                <<"ledger-nonce">> => hb_invariant:int(small)
-            },
+            InitializedFields,
             Opts
         ),
     hb_cache:ensure_all_loaded(Ledger, Opts).
