@@ -212,6 +212,22 @@ mint(State, From, Recipient, Quantity, Opts) ->
         Opts
     ).
 
+mint_batch(State, From, Quantities, Opts) ->
+    dev_token:handle_action(
+        <<"mint">>,
+        State,
+        #{
+            <<"body">> =>
+                #{
+                    <<"action">> => <<"Mint">>,
+                    <<"from">> => From,
+                    <<"mode">> => <<"batch">>,
+                    <<"quantities">> => Quantities
+                }
+        },
+        Opts
+    ).
+
 set_field(State, From, Fields, Opts) ->
     dev_token:handle_action(
         <<"set">>,
@@ -714,6 +730,163 @@ mint_authority_mint_test() ->
     ?assertEqual(Recipient, hb_ao:get(<<"target">>, Notice, Opts)),
     ?assertEqual(Recipient, hb_ao:get(<<"recipient">>, Notice, Opts)),
     ?assertEqual(7, hb_ao:get(<<"quantity">>, Notice, Opts)).
+
+max_supply_is_enforced_by_default_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"max-supply">> => 8
+                    }
+            },
+            Opts
+        ),
+    {ok, AtLimit} = mint(Base, Authority, Recipient, 7, Opts),
+    ?assertEqual(7, balance(AtLimit, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, AtLimit, Opts)),
+    ?assertEqual(
+        {error, <<"Max supply exceeded.">>},
+        mint(AtLimit, Authority, Recipient, 1, Opts)
+    ),
+    ?assertEqual(7, balance(AtLimit, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, AtLimit, Opts)).
+
+max_supply_applies_to_batch_total_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    RecipientA = id(<<"recipient-a">>),
+    RecipientB = id(<<"recipient-b">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"max-supply">> => 10
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Max supply exceeded.">>},
+        mint_batch(Base, Authority, #{ RecipientA => 4, RecipientB => 6 }, Opts)
+    ),
+    ?assertEqual(0, balance(Base, RecipientA, Opts)),
+    ?assertEqual(0, balance(Base, RecipientB, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)),
+    {ok, AtLimit} =
+        mint_batch(
+            Base,
+            Authority,
+            #{ RecipientA => 4, RecipientB => 5 },
+            Opts
+        ),
+    ?assertEqual(4, balance(AtLimit, RecipientA, Opts)),
+    ?assertEqual(5, balance(AtLimit, RecipientB, Opts)),
+    ?assertEqual(10, hb_ao:get(<<"total-supply">>, AtLimit, Opts)).
+
+set_authority_can_disable_max_supply_test() ->
+    Opts = opts(),
+    Setter = id(<<"setter">>),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"max-supply">> => 5,
+                        <<"max-supply-enabled">> => true,
+                        <<"set-authority">> => Setter,
+                        <<"whitelisted-fields">> => [<<"max-supply-enabled">>]
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Max supply exceeded.">>},
+        mint(Base, Authority, Recipient, 5, Opts)
+    ),
+    ?assertEqual(
+        {error, <<"Too few acceptable committers present.">>},
+        set_field(
+            Base,
+            Authority,
+            #{ <<"max-supply-enabled">> => false },
+            Opts
+        )
+    ),
+    {ok, Disabled} =
+        set_field(
+            Base,
+            Setter,
+            #{ <<"max-supply-enabled">> => false },
+            Opts
+        ),
+    {ok, Minted} = mint(Disabled, Authority, Recipient, 5, Opts),
+    ?assertEqual(false, hb_ao:get(<<"max-supply-enabled">>, Minted, Opts)),
+    ?assertEqual(5, balance(Minted, Recipient, Opts)),
+    ?assertEqual(6, hb_ao:get(<<"total-supply">>, Minted, Opts)).
+
+invalid_max_supply_policy_fails_closed_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Common =
+        #{
+            <<"mint-device">> => <<"mint-authority@1.0">>,
+            <<"mint-authority">> => Authority
+        },
+    Cases =
+        [
+            {
+                #{ <<"max-supply-enabled">> => true },
+                <<"Max supply must be a non-negative integer.">>
+            },
+            {
+                #{ <<"max-supply">> => -1 },
+                <<"Max supply must be a non-negative integer.">>
+            },
+            {
+                #{ <<"max-supply">> => 8, <<"max-supply-enabled">> => <<"true">> },
+                <<"Invalid `max-supply-enabled` type.">>
+            }
+        ],
+    lists:foreach(
+        fun({Policy, ExpectedError}) ->
+            Base =
+                token_state(
+                    #{
+                        total_supply => 1,
+                        initial_balances => #{ Authority => 1 },
+                        extra => maps:merge(Common, Policy)
+                    },
+                    Opts
+                ),
+            ?assertEqual(
+                {error, ExpectedError},
+                mint(Base, Authority, Recipient, 7, Opts)
+            ),
+            ?assertEqual(0, balance(Base, Recipient, Opts)),
+            ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts))
+        end,
+        Cases
+    ).
 
 mint_enabled_defaults_to_opts_test() ->
     Opts = (opts())#{ <<"mint-enabled">> => false },

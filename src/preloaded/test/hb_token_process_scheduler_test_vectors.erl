@@ -440,6 +440,94 @@ mint_enabled_council_control_through_scheduler() ->
     ?assertEqual(7, balance(RejectedAgain, Recipient, Opts)),
     ?assertEqual(8, state_field(RejectedAgain, <<"total-supply">>, 0, Opts)).
 
+max_supply_council_control_through_scheduler_test_() ->
+    {timeout, 120, fun max_supply_council_control_through_scheduler/0}.
+
+max_supply_council_control_through_scheduler() ->
+    Opts = opts(),
+    {AdminA, AdminAWallet} = signer(),
+    {AdminB, AdminBWallet} = signer(),
+    {AdminC, _AdminCWallet} = signer(),
+    {MintAuthority, MintAuthorityWallet} = signer(),
+    {Recipient, _RecipientWallet} = signer(),
+    Process0 =
+        dev_token_lib:ledger(
+            #{
+                <<"execution-device">> => <<"token@1.0">>,
+                <<"security-device">> => <<"security@1.0">>,
+                <<"authority">> => [],
+                <<"mint-device">> => <<"mint-authority@1.0">>,
+                <<"mint-authority">> => MintAuthority,
+                <<"max-supply">> => 5,
+                <<"max-supply-enabled">> => true,
+                <<"set-authority">> => [AdminA, AdminB, AdminC],
+                <<"set-authority-match">> => 2,
+                <<"whitelisted-fields">> => [<<"max-supply-enabled">>],
+                <<"balances">> => #{ MintAuthority => 1 },
+                <<"total-supply">> => 1
+            },
+            Opts
+        ),
+    MintRequest =
+        #{
+            <<"action">> => <<"Mint">>,
+            <<"mode">> => <<"single">>,
+            <<"recipient">> => Recipient,
+            <<"quantity">> => 5
+        },
+    {0, Capped} =
+        schedule_and_compute(
+            Process0,
+            MintRequest,
+            MintAuthorityWallet,
+            MintAuthorityWallet,
+            Opts
+        ),
+    ?assertEqual(0, balance(Capped, Recipient, Opts)),
+    ?assertEqual(1, state_field(Capped, <<"total-supply">>, 0, Opts)),
+    {1, SingleSignerSet} =
+        schedule_and_compute(
+            Capped,
+            #{
+                <<"action">> => <<"Set">>,
+                <<"max-supply-enabled">> => false,
+                <<"timestamp">> => 1
+            },
+            AdminAWallet,
+            AdminAWallet,
+            Opts
+        ),
+    ?assertEqual(
+        true,
+        state_field(SingleSignerSet, <<"max-supply-enabled">>, not_found, Opts)
+    ),
+    {2, Disabled} =
+        schedule_and_compute(
+            SingleSignerSet,
+            #{
+                <<"action">> => <<"Set">>,
+                <<"max-supply-enabled">> => false,
+                <<"timestamp">> => 2
+            },
+            [AdminAWallet, AdminBWallet],
+            AdminAWallet,
+            Opts
+        ),
+    ?assertEqual(
+        false,
+        state_field(Disabled, <<"max-supply-enabled">>, not_found, Opts)
+    ),
+    {3, Minted} =
+        schedule_and_compute(
+            Disabled,
+            MintRequest,
+            MintAuthorityWallet,
+            MintAuthorityWallet,
+            Opts
+        ),
+    ?assertEqual(5, balance(Minted, Recipient, Opts)),
+    ?assertEqual(6, state_field(Minted, <<"total-supply">>, 0, Opts)).
+
 delegated_action_allowlist_through_scheduler_test_() ->
     {timeout, 120, fun delegated_action_allowlist_through_scheduler/0}.
 
