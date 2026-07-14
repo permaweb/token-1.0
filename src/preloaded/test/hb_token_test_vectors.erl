@@ -718,7 +718,7 @@ fixed_supply_without_mint_device_cannot_mint_test() ->
 mint_authority_mint_test() ->
     Opts = opts(),
     Authority = id(<<"authority">>),
-    Recipient = id(<<"recipient">>),
+    Recipient = id(<<"Recipient">>),
     Base =
         token_state(
             #{
