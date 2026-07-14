@@ -230,6 +230,113 @@ scheduled_paths_are_noops_and_process_continues() ->
     ?assertEqual(0, balance(Process4, UnauthorizedCaller, Opts)),
     ?assertEqual(10, state_field(Process4, <<"total-supply">>, 0, Opts)).
 
+malformed_actions_do_not_block_process_test_() ->
+    {timeout, 120, fun malformed_actions_do_not_block_process/0}.
+
+malformed_actions_do_not_block_process() ->
+    Opts = opts(),
+    {Sender, SenderWallet} = signer(),
+    {Recipient, _RecipientWallet} = signer(),
+    {MintAuthority, MintAuthorityWallet} = signer(),
+    Process0 =
+        dev_token_lib:ledger(
+            #{
+                <<"execution-device">> => <<"token@1.0">>,
+                <<"security-device">> => <<"security@1.0">>,
+                <<"authority">> => [],
+                <<"mint-device">> => <<"mint-authority@1.0">>,
+                <<"mint-authority">> => MintAuthority,
+                <<"balances">> => #{ Sender => 10, MintAuthority => 1 },
+                <<"total-supply">> => 11
+            },
+            Opts
+        ),
+    FailedRequests =
+        [
+            {#{ <<"action">> => #{} }, SenderWallet},
+            {#{ <<"action">> => <<255>> }, SenderWallet},
+            {
+                #{
+                    <<"action">> => <<"Transfer">>,
+                    <<"recipient">> => #{},
+                    <<"quantity">> => 1
+                },
+                SenderWallet
+            },
+            {
+                #{
+                    <<"action">> => <<"Transfer">>,
+                    <<"recipient">> => Recipient,
+                    <<"quantity">> => #{}
+                },
+                SenderWallet
+            },
+            {#{ <<"action">> => <<"Set">>, <<"transfer-enabled">> => false },
+                SenderWallet},
+            {#{ <<"action">> => <<"Subscribe">>, <<"subscribe-action">> => #{} },
+                SenderWallet},
+            {
+                #{
+                    <<"action">> => <<"Subscribe">>,
+                    <<"subscribe-action">> => <<"Credit-Notice">>,
+                    <<"subscribe-target">> => #{}
+                },
+                SenderWallet
+            },
+            {#{ <<"action">> => <<"Unsubscribe">>, <<"subscribe-action">> => #{} },
+                SenderWallet},
+            {
+                #{
+                    <<"action">> => <<"Mint">>,
+                    <<"mode">> => <<"single">>,
+                    <<"recipient">> => #{},
+                    <<"quantity">> => 1
+                },
+                MintAuthorityWallet
+            },
+            {
+                #{
+                    <<"action">> => <<"Mint">>,
+                    <<"mode">> => <<"batch">>,
+                    <<"quantities">> => #{ Recipient => #{} }
+                },
+                MintAuthorityWallet
+            },
+            {#{ <<"action">> => <<"Deposit">> }, MintAuthorityWallet}
+        ],
+    {FailedState, NextSlot} =
+        lists:foldl(
+            fun({Request, Wallet}, {Process, Slot}) ->
+                {Slot, Computed} =
+                    schedule_and_compute(Process, Request, Wallet, Wallet, Opts),
+                ?assertEqual(Slot, hb_ao:get(<<"at-slot">>, Computed, Opts)),
+                ?assertEqual(10, balance(Computed, Sender, Opts)),
+                ?assertEqual(0, balance(Computed, Recipient, Opts)),
+                ?assertEqual(1, balance(Computed, MintAuthority, Opts)),
+                ?assertEqual(11, state_field(Computed, <<"total-supply">>, 0, Opts)),
+                {Computed, Slot + 1}
+            end,
+            {Process0, 0},
+            FailedRequests
+        ),
+    {NextSlot, FinalState} =
+        schedule_and_compute(
+            FailedState,
+            #{
+                <<"action">> => <<"Transfer">>,
+                <<"recipient">> => Recipient,
+                <<"quantity">> => 1
+            },
+            SenderWallet,
+            SenderWallet,
+            Opts
+        ),
+    ?assertEqual(NextSlot, hb_ao:get(<<"at-slot">>, FinalState, Opts)),
+    ?assertEqual(9, balance(FinalState, Sender, Opts)),
+    ?assertEqual(1, balance(FinalState, Recipient, Opts)),
+    ?assertEqual(1, balance(FinalState, MintAuthority, Opts)),
+    ?assertEqual(11, state_field(FinalState, <<"total-supply">>, 0, Opts)).
+
 two_of_three_set_succeeds_through_scheduler_test_() ->
     {timeout, 120, fun two_of_three_set_succeeds_through_scheduler/0}.
 
@@ -545,7 +652,8 @@ delegated_action_allowlist_through_scheduler() ->
                 <<"security-device">> => <<"security@1.0">>,
                 <<"authority">> => [Scheduler],
                 <<"authority-match">> => 1,
-                <<"authority-actions">> => [<<"Transfer">>],
+                <<"authority-actions">> =>
+                    [<<"Transfer">>, <<"Subscribe">>, <<"Unsubscribe">>],
                 <<"mint-device">> => <<"mint-authority@1.0">>,
                 <<"mint-authority">> => MintAuthority,
                 <<"balances">> => #{ Dex => 10 },
@@ -569,9 +677,35 @@ delegated_action_allowlist_through_scheduler() ->
     ?assertEqual(7, balance(Transferred, Dex, Opts)),
     ?assertEqual(3, balance(Transferred, Recipient, Opts)),
     ?assertEqual(10, state_field(Transferred, <<"total-supply">>, 0, Opts)),
-    {1, RejectedMint} =
+    {1, Subscribed} =
         schedule_and_compute(
             Transferred,
+            #{
+                <<"action">> => <<"Subscribe">>,
+                <<"from-process">> => Dex,
+                <<"subscribe-action">> => <<"register">>
+            },
+            SchedulerWallet,
+            SchedulerWallet,
+            Opts
+        ),
+    ?assertEqual([Dex], dev_token_lib:subscribers(Subscribed, <<"register">>, Opts)),
+    {2, Unsubscribed} =
+        schedule_and_compute(
+            Subscribed,
+            #{
+                <<"action">> => <<"Unsubscribe">>,
+                <<"from-process">> => Dex,
+                <<"subscribe-action">> => <<"register">>
+            },
+            SchedulerWallet,
+            SchedulerWallet,
+            Opts
+        ),
+    ?assertEqual([], dev_token_lib:subscribers(Unsubscribed, <<"register">>, Opts)),
+    {3, RejectedMint} =
+        schedule_and_compute(
+            Unsubscribed,
             #{
                 <<"action">> => <<"Mint">>,
                 <<"from-process">> => MintAuthority,

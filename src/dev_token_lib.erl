@@ -49,7 +49,8 @@ ledger(Extra, Opts) ->
                     <<"scheduler-device">> => <<"scheduler@1.0">>,
                     <<"scheduler">> => hb_util:human_id(HostWallet),
                     <<"authority">> => hb_util:human_id(HostWallet),
-                    <<"authority-actions">> => [<<"Transfer">>]
+                    <<"authority-actions">> =>
+                        [<<"Transfer">>, <<"Subscribe">>, <<"Unsubscribe">>]
                 },
                 ModExtra
             ),

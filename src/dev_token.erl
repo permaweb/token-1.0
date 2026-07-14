@@ -254,15 +254,22 @@ enforce_security(Base, Req, Opts) ->
 
 %% @doc Route the request to the appropriate key resolution function, depending
 %% upon the `action' specified.
-handle_action(Action, Base, Req, Opts) ->
+handle_action(Action, Base, Req, Opts) when is_binary(Action) ->
     ?event(token_short, {token_action, Action}, Opts),
-    case hb_util:to_lower(hb_ao:normalize_key(Action)) of
-        <<"transfer">> -> transfer(Base, Req, Opts);
-        <<"set">> -> secure_set(Base, Req, Opts);
-        <<"subscribe">> -> outbox_subscribe(Base, Req, Opts);
-        <<"unsubscribe">> -> outbox_unsubscribe(Base, Req, Opts);
-        MintDevAction -> action_as_mint_device(MintDevAction, Base, Req, Opts)
-    end.
+    try
+        case hb_util:to_lower(Action) of
+            <<"transfer">> -> transfer(Base, Req, Opts);
+            <<"set">> -> secure_set(Base, Req, Opts);
+            <<"subscribe">> -> outbox_subscribe(Base, Req, Opts);
+            <<"unsubscribe">> -> outbox_unsubscribe(Base, Req, Opts);
+            MintDevAction -> action_as_mint_device(MintDevAction, Base, Req, Opts)
+        end
+    catch
+        error:Reason -> {error, Reason}
+    end;
+
+handle_action(_Action, _Base, _Req, _Opts) ->
+    {error, <<"Invalid Action format">>}.
 
 %% @doc Get the balance for an account. Normalize the minting state for that
 %% account before returning.
