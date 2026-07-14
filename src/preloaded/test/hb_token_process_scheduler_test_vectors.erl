@@ -288,6 +288,7 @@ malformed_actions_do_not_block_process() ->
             {
                 #{
                     <<"action">> => <<"Mint">>,
+                    <<"mint-nonce">> => 0,
                     <<"mode">> => <<"single">>,
                     <<"recipient">> => #{},
                     <<"quantity">> => 1
@@ -297,6 +298,7 @@ malformed_actions_do_not_block_process() ->
             {
                 #{
                     <<"action">> => <<"Mint">>,
+                    <<"mint-nonce">> => 0,
                     <<"mode">> => <<"batch">>,
                     <<"quantities">> => #{ Recipient => #{} }
                 },
@@ -414,6 +416,7 @@ wallet_only_mint_authority_through_scheduler() ->
             Process0,
             #{
                 <<"action">> => <<"Mint">>,
+                <<"mint-nonce">> => 0,
                 <<"from-process">> => MintAuthority,
                 <<"mode">> => <<"single">>,
                 <<"recipient">> => Recipient,
@@ -430,6 +433,7 @@ wallet_only_mint_authority_through_scheduler() ->
             Rejected,
             #{
                 <<"action">> => <<"Mint">>,
+                <<"mint-nonce">> => 0,
                 <<"mode">> => <<"single">>,
                 <<"recipient">> => Recipient,
                 <<"quantity">> => 7
@@ -471,6 +475,7 @@ mint_enabled_council_control_through_scheduler() ->
     MintRequest =
         #{
             <<"action">> => <<"Mint">>,
+            <<"mint-nonce">> => 0,
             <<"mode">> => <<"single">>,
             <<"recipient">> => Recipient,
             <<"quantity">> => 7
@@ -578,6 +583,7 @@ max_supply_council_control_through_scheduler() ->
     MintRequest =
         #{
             <<"action">> => <<"Mint">>,
+            <<"mint-nonce">> => 0,
             <<"mode">> => <<"single">>,
             <<"recipient">> => Recipient,
             <<"quantity">> => 5
@@ -708,6 +714,7 @@ delegated_action_allowlist_through_scheduler() ->
             Unsubscribed,
             #{
                 <<"action">> => <<"Mint">>,
+                <<"mint-nonce">> => 0,
                 <<"from-process">> => MintAuthority,
                 <<"mode">> => <<"single">>,
                 <<"recipient">> => Recipient,
@@ -720,6 +727,79 @@ delegated_action_allowlist_through_scheduler() ->
     ?assertEqual(7, balance(RejectedMint, Dex, Opts)),
     ?assertEqual(3, balance(RejectedMint, Recipient, Opts)),
     ?assertEqual(10, state_field(RejectedMint, <<"total-supply">>, 0, Opts)).
+
+mint_nonce_replay_rejected_through_scheduler_test_() ->
+    {timeout, 120, fun mint_nonce_replay_rejected_through_scheduler/0}.
+
+mint_nonce_replay_rejected_through_scheduler() ->
+    Opts = opts(),
+    {MintAuthority, MintAuthorityWallet} = signer(),
+    {Recipient, _RecipientWallet} = signer(),
+    Process0 =
+        dev_token_lib:ledger(
+            #{
+                <<"execution-device">> => <<"token@1.0">>,
+                <<"security-device">> => <<"security@1.0">>,
+                <<"authority">> => [],
+                <<"mint-device">> => <<"mint-authority@1.0">>,
+                <<"mint-authority">> => MintAuthority,
+                <<"balances">> => #{ MintAuthority => 1 },
+                <<"total-supply">> => 1
+            },
+            Opts
+        ),
+    MintBody =
+        #{
+            <<"action">> => <<"Mint">>,
+            <<"mint-nonce">> => 42,
+            <<"mode">> => <<"single">>,
+            <<"recipient">> => Recipient,
+            <<"quantity">> => 3
+        },
+    SignedMint = sign_body(Process0, MintBody, MintAuthorityWallet, Opts),
+    {0, _} = schedule(Process0, SignedMint, MintAuthorityWallet, Opts),
+    {ok, Process1} =
+        hb_ao:resolve(
+            Process0,
+            #{ <<"path">> => <<"compute">>, <<"slot">> => 0 },
+            Opts
+        ),
+    ?assertEqual(3, balance(Process1, Recipient, Opts)),
+    ?assertEqual(4, state_field(Process1, <<"total-supply">>, 0, Opts)),
+    ?assertEqual(42, state_field(Process1, <<"mint-nonce">>, -1, Opts)),
+
+    ResignedMint = sign_body(Process1, MintBody, MintAuthorityWallet, Opts),
+    ?assertEqual(
+        hb_message:id(SignedMint, none, Opts),
+        hb_message:id(ResignedMint, none, Opts)
+    ),
+    ?assertNotEqual(
+        hb_message:id(SignedMint, signed, Opts),
+        hb_message:id(ResignedMint, signed, Opts)
+    ),
+    {1, _} = schedule(Process1, ResignedMint, MintAuthorityWallet, Opts),
+    {ok, Process2} =
+        hb_ao:resolve(
+            Process1,
+            #{ <<"path">> => <<"compute">>, <<"slot">> => 1 },
+            Opts
+        ),
+    ?assertEqual(1, hb_ao:get(<<"at-slot">>, Process2, Opts)),
+    ?assertEqual(3, balance(Process2, Recipient, Opts)),
+    ?assertEqual(4, state_field(Process2, <<"total-supply">>, 0, Opts)),
+    ?assertEqual(42, state_field(Process2, <<"mint-nonce">>, -1, Opts)),
+
+    {2, Process3} =
+        schedule_and_compute(
+            Process2,
+            MintBody#{ <<"mint-nonce">> => 43 },
+            MintAuthorityWallet,
+            MintAuthorityWallet,
+            Opts
+        ),
+    ?assertEqual(6, balance(Process3, Recipient, Opts)),
+    ?assertEqual(7, state_field(Process3, <<"total-supply">>, 0, Opts)),
+    ?assertEqual(43, state_field(Process3, <<"mint-nonce">>, -1, Opts)).
 
 delegated_signature_expansion_replay_rejected_test_() ->
     {timeout, 120, fun delegated_signature_expansion_replay_rejected/0}.

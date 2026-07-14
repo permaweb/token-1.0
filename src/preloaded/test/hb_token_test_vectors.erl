@@ -197,6 +197,9 @@ transfer(State, From, To, Quantity, Opts) ->
     ).
 
 mint(State, From, Recipient, Quantity, Opts) ->
+    mint(State, From, Recipient, Quantity, next_mint_nonce(State, Opts), Opts).
+
+mint(State, From, Recipient, Quantity, MintNonce, Opts) ->
     dev_token:handle_action(
         <<"mint">>,
         State,
@@ -204,6 +207,7 @@ mint(State, From, Recipient, Quantity, Opts) ->
             <<"body">> =>
                 #{
                     <<"action">> => <<"Mint">>,
+                    <<"mint-nonce">> => MintNonce,
                     <<"from">> => From,
                     <<"recipient">> => Recipient,
                     <<"quantity">> => Quantity
@@ -213,6 +217,9 @@ mint(State, From, Recipient, Quantity, Opts) ->
     ).
 
 mint_batch(State, From, Quantities, Opts) ->
+    mint_batch(State, From, Quantities, next_mint_nonce(State, Opts), Opts).
+
+mint_batch(State, From, Quantities, MintNonce, Opts) ->
     dev_token:handle_action(
         <<"mint">>,
         State,
@@ -220,6 +227,7 @@ mint_batch(State, From, Quantities, Opts) ->
             <<"body">> =>
                 #{
                     <<"action">> => <<"Mint">>,
+                    <<"mint-nonce">> => MintNonce,
                     <<"from">> => From,
                     <<"mode">> => <<"batch">>,
                     <<"quantities">> => Quantities
@@ -227,6 +235,9 @@ mint_batch(State, From, Quantities, Opts) ->
         },
         Opts
     ).
+
+next_mint_nonce(State, Opts) ->
+    hb_ao:get(<<"mint-nonce">>, State, -1, Opts) + 1.
 
 set_field(State, From, Fields, Opts) ->
     dev_token:handle_action(
@@ -726,10 +737,92 @@ mint_authority_mint_test() ->
     ?assertEqual(1, balance(Minted, Authority, Opts)),
     ?assertEqual(7, balance(Minted, Recipient, Opts)),
     ?assertEqual(8, hb_ao:get(<<"total-supply">>, Minted, Opts)),
+    ?assertEqual(0, hb_ao:get(<<"mint-nonce">>, Minted, Opts)),
     ?assertEqual(<<"Mint-Notice">>, hb_ao:get(<<"action">>, Notice, Opts)),
+    ?assertEqual(0, hb_ao:get(<<"mint-nonce">>, Notice, Opts)),
     ?assertEqual(Recipient, hb_ao:get(<<"target">>, Notice, Opts)),
     ?assertEqual(Recipient, hb_ao:get(<<"recipient">>, Notice, Opts)),
     ?assertEqual(7, hb_ao:get(<<"quantity">>, Notice, Opts)).
+
+mint_nonce_must_advance_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority
+                    }
+            },
+            Opts
+        ),
+    {ok, Minted} = mint(Base, Authority, Recipient, 7, 10, Opts),
+    ?assertEqual(7, balance(Minted, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, Minted, Opts)),
+    ?assertEqual(10, hb_ao:get(<<"mint-nonce">>, Minted, Opts)),
+    ?assertEqual(
+        {error, <<"Mint nonce must advance.">>},
+        mint(Minted, Authority, Recipient, 7, 10, Opts)
+    ),
+    ?assertEqual(
+        {error, <<"Mint nonce must advance.">>},
+        mint(Minted, Authority, Recipient, 7, 9, Opts)
+    ),
+    {ok, Advanced} = mint(Minted, Authority, Recipient, 1, 12, Opts),
+    ?assertEqual(8, balance(Advanced, Recipient, Opts)),
+    ?assertEqual(9, hb_ao:get(<<"total-supply">>, Advanced, Opts)),
+    ?assertEqual(12, hb_ao:get(<<"mint-nonce">>, Advanced, Opts)).
+
+invalid_mint_nonce_fails_closed_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority
+                    }
+            },
+            Opts
+        ),
+    MissingNonceBody =
+        #{
+            <<"action">> => <<"Mint">>,
+            <<"from">> => Authority,
+            <<"recipient">> => Recipient,
+            <<"quantity">> => 7
+        },
+    ?assertEqual(
+        {error, <<"Mint nonce must be a non-negative integer.">>},
+        dev_token:handle_action(
+            <<"mint">>,
+            Base,
+            #{ <<"body">> => MissingNonceBody },
+            Opts
+        )
+    ),
+    lists:foreach(
+        fun(Nonce) ->
+            ?assertEqual(
+                {error, <<"Mint nonce must be a non-negative integer.">>},
+                mint(Base, Authority, Recipient, 7, Nonce, Opts)
+            )
+        end,
+        [-1, <<"0">>]
+    ),
+    ?assertEqual(0, balance(Base, Recipient, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)),
+    ?assertEqual(not_found, hb_ao:get(<<"mint-nonce">>, Base, not_found, Opts)).
 
 max_supply_is_enforced_by_default_test() ->
     Opts = opts(),
