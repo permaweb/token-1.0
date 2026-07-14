@@ -720,3 +720,64 @@ delegated_action_allowlist_through_scheduler() ->
     ?assertEqual(7, balance(RejectedMint, Dex, Opts)),
     ?assertEqual(3, balance(RejectedMint, Recipient, Opts)),
     ?assertEqual(10, state_field(RejectedMint, <<"total-supply">>, 0, Opts)).
+
+delegated_signature_expansion_replay_rejected_test_() ->
+    {timeout, 120, fun delegated_signature_expansion_replay_rejected/0}.
+
+delegated_signature_expansion_replay_rejected() ->
+    Opts = opts(),
+    SchedulerWallet = maps:get(<<"priv-wallet">>, Opts),
+    Scheduler = hb_util:human_id(ar_wallet:to_address(SchedulerWallet)),
+    {Dex, _DexWallet} = signer(),
+    {Recipient, _RecipientWallet} = signer(),
+    {_External, ExternalWallet} = signer(),
+    Process0 =
+        dev_token_lib:ledger(
+            #{
+                <<"execution-device">> => <<"token@1.0">>,
+                <<"security-device">> => <<"security@1.0">>,
+                <<"authority">> => [Scheduler],
+                <<"authority-match">> => 1,
+                <<"authority-actions">> => [<<"Transfer">>],
+                <<"balances">> => #{Dex => 10},
+                <<"total-supply">> => 10
+            },
+            Opts
+        ),
+    SignedBody =
+        sign_body(
+            Process0,
+            #{
+                <<"action">> => <<"Transfer">>,
+                <<"from-process">> => Dex,
+                <<"recipient">> => Recipient,
+                <<"quantity">> => 3
+            },
+            SchedulerWallet,
+            Opts
+        ),
+    {0, _} = schedule(Process0, SignedBody, SchedulerWallet, Opts),
+    {ok, Process1} =
+        hb_ao:resolve(
+            Process0,
+            #{<<"path">> => <<"compute">>, <<"slot">> => 0},
+            Opts
+        ),
+    ?assertEqual(7, balance(Process1, Dex, Opts)),
+    ?assertEqual(3, balance(Process1, Recipient, Opts)),
+
+    ExpandedBody =
+        hb_message:commit(
+            SignedBody,
+            Opts#{<<"priv-wallet">> => ExternalWallet}
+        ),
+    ?assertEqual(2, length(lists:uniq(hb_message:signers(ExpandedBody, Opts)))),
+    {1, _} = schedule(Process1, ExpandedBody, ExternalWallet, Opts),
+    {ok, Process2} =
+        hb_ao:resolve(
+            Process1,
+            #{<<"path">> => <<"compute">>, <<"slot">> => 1},
+            Opts
+        ),
+    ?assertEqual(7, balance(Process2, Dex, Opts)),
+    ?assertEqual(3, balance(Process2, Recipient, Opts)).
