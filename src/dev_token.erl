@@ -332,6 +332,8 @@ transfer(Base, Assignment, Opts) ->
         {ok, Recipient0} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
         {ok, Quantity} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
         true ?= transfer_enabled(Base, Opts),
+        true ?= (is_integer(Quantity) and (Quantity >= 0))
+            orelse {error, <<"Quantity must be a non-negative integer.">>},
         % validate From/Recipient sanity
         true ?= lib_token:validate_address(From0, [], Opts),
         true ?= lib_token:validate_address(Recipient0, [], Opts),
@@ -339,11 +341,14 @@ transfer(Base, Assignment, Opts) ->
         Recipient = lib_token:account_key(Recipient0),
         % Normalize the base's minting state for the sender.
         {ok, NormBase} ?=
-            normalize_mint(
-                Base,
-                Assignment#{ <<"subject">> => From },
-                Opts
-            ),
+            case Quantity of
+                0 -> {ok, Base};
+                _ -> normalize_mint(
+                    Base,
+                    Assignment#{ <<"subject">> => From },
+                    Opts
+                )
+            end,
         % Retrieve balances from the base state.
         Balances = hb_ao:get(<<"balances">>, NormBase, Opts),
         ?event(debug_token, {balances_before_transfer, Balances}, Opts),
@@ -364,13 +369,11 @@ transfer(Base, Assignment, Opts) ->
         true ?= (is_integer(SenderBalance) and is_integer(RecipientBalance)
                 and (SenderBalance >= 0) and (RecipientBalance >= 0))
             orelse {error, <<"Invalid balance values.">>},
-        true ?= (is_integer(Quantity) and (Quantity >= 0))
-            orelse {error, <<"Quantity must be a non-negative integer.">>},
         true ?= (SenderBalance >= Quantity) 
             orelse {error, <<"Insufficient balance.">>},
-        % Handle self-transfer: skip balance updates
+        % Handle zero and self transfers without balance-trie writes.
         NewBaseAfterTransfer =
-            case From =:= Recipient of
+            case (Quantity =:= 0) orelse (From =:= Recipient) of
                 true -> NormBase;
                 false ->
                     {ok, NewBalances} =

@@ -499,6 +499,32 @@ basic_transfer_updates_balances_test() ->
         lists:sort([hb_ao:get(<<"action">>, Notice, Opts) || Notice <- Notices])
     ).
 
+zero_transfer_emits_notices_without_balance_writes_test() ->
+    Opts = opts(),
+    Treasury = id(<<"treasury">>),
+    Sender = id(<<"sender">>),
+    Recipient = id(<<"recipient">>),
+    Base = token_state(#{ initial_balances => #{ Treasury => 1 } }, Opts),
+    Balances = hb_ao:get(<<"balances">>, Base, Opts),
+    {ok, Updated} = transfer(Base, Sender, Recipient, 0, Opts),
+    UpdatedBalances = hb_ao:get(<<"balances">>, Updated, Opts),
+    ?assertEqual(Balances, UpdatedBalances),
+    ?assertEqual(
+        {error, not_found},
+        hb_ao:resolve(UpdatedBalances, account_key(Sender), Opts)
+    ),
+    ?assertEqual(
+        {error, not_found},
+        hb_ao:resolve(UpdatedBalances, account_key(Recipient), Opts)
+    ),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Updated, Opts)),
+    Notices = outbox(Updated, Opts),
+    ?assertEqual(2, length(Notices)),
+    ?assert(lists:all(
+        fun(Notice) -> hb_ao:get(<<"quantity">>, Notice, Opts) =:= 0 end,
+        Notices
+    )).
+
 transfer_enabled_defaults_to_opts_test() ->
     Opts = (opts())#{ <<"transfer-enabled">> => false },
     Alice = id(<<"alice">>),
