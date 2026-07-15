@@ -614,6 +614,8 @@ outbox_send(Messages, Base, Opts) ->
 
 outbox_subscribe(Base, Req, Opts) ->
     maybe
+        true ?= subscription_allowed(Req, Base, Opts) orelse
+            {error, <<"Subscription is not allowed.">>},
         {ok, Outbox} ?= process_outbox(Opts),
         Outbox:subscribe(Base, Req, Opts)
     end.
@@ -622,6 +624,32 @@ outbox_unsubscribe(Base, Req, Opts) ->
     maybe
         {ok, Outbox} ?= process_outbox(Opts),
         Outbox:unsubscribe(Base, Req, Opts)
+    end.
+
+subscription_allowed(Req, Base, Opts) ->
+    try
+        Body = hb_maps:get(<<"body">>, Req, not_found, Opts),
+        Action = hb_maps:get(<<"subscribe-action">>, Body, not_found, Opts),
+        Target = hb_maps:get(<<"subscribe-target">>, Body, <<"broadcast">>, Opts),
+        Listener = hb_maps:get(<<"from">>, Body, not_found, Opts),
+        Policy = hb_util:message_to_ordered_list(
+            hb_maps:get(<<"allowed-subscriptions">>, Base, [], Opts),
+            Opts
+        ),
+        is_binary(Action) andalso is_binary(Target) andalso is_binary(Listener)
+            andalso lists:any(
+                fun(Entry) ->
+                    {Action, Target, Listener} =:=
+                        {
+                            hb_maps:get(<<"action">>, Entry, not_found, Opts),
+                            hb_maps:get(<<"target">>, Entry, not_found, Opts),
+                            hb_maps:get(<<"listener">>, Entry, not_found, Opts)
+                        }
+                end,
+                Policy
+            )
+    catch
+        _:_ -> false
     end.
 
 process_outbox(Opts) ->

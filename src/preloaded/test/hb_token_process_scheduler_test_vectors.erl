@@ -648,6 +648,7 @@ delegated_action_allowlist_through_scheduler() ->
     Opts = opts(),
     SchedulerWallet = maps:get(<<"priv-wallet">>, Opts),
     Scheduler = hb_util:human_id(ar_wallet:to_address(SchedulerWallet)),
+    {Admin, AdminWallet} = signer(),
     {Dex, _DexWallet} = signer(),
     {Recipient, _RecipientWallet} = signer(),
     {MintAuthority, _MintAuthorityWallet} = signer(),
@@ -660,6 +661,16 @@ delegated_action_allowlist_through_scheduler() ->
                 <<"authority-match">> => 1,
                 <<"authority-actions">> =>
                     [<<"Transfer">>, <<"Subscribe">>, <<"Unsubscribe">>],
+                <<"set-authority">> => Admin,
+                <<"whitelisted-fields">> => [<<"allowed-subscriptions">>],
+                <<"allowed-subscriptions">> =>
+                    [
+                        #{
+                            <<"action">> => <<"register">>,
+                            <<"target">> => <<"broadcast">>,
+                            <<"listener">> => Dex
+                        }
+                    ],
                 <<"mint-device">> => <<"mint-authority@1.0">>,
                 <<"mint-authority">> => MintAuthority,
                 <<"balances">> => #{ Dex => 10 },
@@ -689,7 +700,8 @@ delegated_action_allowlist_through_scheduler() ->
             #{
                 <<"action">> => <<"Subscribe">>,
                 <<"from-process">> => Dex,
-                <<"subscribe-action">> => <<"register">>
+                <<"subscribe-action">> => <<"register">>,
+                <<"timestamp">> => 1
             },
             SchedulerWallet,
             SchedulerWallet,
@@ -709,9 +721,37 @@ delegated_action_allowlist_through_scheduler() ->
             Opts
         ),
     ?assertEqual([], dev_token_lib:subscribers(Unsubscribed, <<"register">>, Opts)),
-    {3, RejectedMint} =
+    {3, SubscriptionsDisabled} =
         schedule_and_compute(
             Unsubscribed,
+            #{
+                <<"action">> => <<"Set">>,
+                <<"allowed-subscriptions">> => []
+            },
+            AdminWallet,
+            AdminWallet,
+            Opts
+        ),
+    {4, RejectedSubscription} =
+        schedule_and_compute(
+            SubscriptionsDisabled,
+            #{
+                <<"action">> => <<"Subscribe">>,
+                <<"from-process">> => Dex,
+                <<"subscribe-action">> => <<"register">>,
+                <<"timestamp">> => 2
+            },
+            SchedulerWallet,
+            SchedulerWallet,
+            Opts
+        ),
+    ?assertEqual(
+        [],
+        dev_token_lib:subscribers(RejectedSubscription, <<"register">>, Opts)
+    ),
+    {5, RejectedMint} =
+        schedule_and_compute(
+            RejectedSubscription,
             #{
                 <<"action">> => <<"Mint">>,
                 <<"mint-nonce">> => 0,

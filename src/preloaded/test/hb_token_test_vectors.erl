@@ -182,6 +182,15 @@ subscription_req(Action, Target, Listener, Slot) ->
             }
     }.
 
+subscription_policy(Action, Target, Listener) ->
+    [
+        #{
+            <<"action">> => Action,
+            <<"target">> => Target,
+            <<"listener">> => Listener
+        }
+    ].
+
 has_message(Pairs, Msgs, Opts) ->
     lists:any(
         fun(Msg) ->
@@ -755,6 +764,45 @@ outbox_unsubscribe_removes_listener_test() ->
             Opts
         ),
     ?assertEqual(1, length(outbox(Updated, Opts))).
+
+token_subscription_policy_test() ->
+    Opts = opts(),
+    Listener = hb_util:human_id(ar_wallet:new()),
+    Other = hb_util:human_id(ar_wallet:new()),
+    Policy = subscription_policy(<<"register">>, <<"broadcast">>, Listener),
+    Base =
+        token_state(
+            #{
+                extra => #{
+                    <<"allowed-subscriptions">> => Policy
+                }
+            },
+            Opts
+        ),
+    lists:foreach(
+        fun(Req) ->
+            ?assertMatch(
+                {error, _},
+                dev_token:handle_action(<<"subscribe">>, Base, Req, Opts)
+            )
+        end,
+        [
+            subscription_req(<<"register">>, default, Other, 40),
+            subscription_req(<<"other">>, default, Listener, 40),
+            subscription_req(<<"register">>, <<"other">>, Listener, 40)
+        ]
+    ),
+    {ok, Subscribed} =
+        dev_token:handle_action(
+            <<"subscribe">>,
+            Base,
+            subscription_req(<<"register">>, default, Listener, 41),
+            Opts
+        ),
+    ?assertEqual(
+        [Listener],
+        outbox_subscribers(Subscribed, <<"register">>, Opts)
+    ).
 
 fixed_supply_transfer_test() ->
     Opts = opts(),
