@@ -16,12 +16,12 @@ opts() ->
 id(Bin) when is_binary(Bin) ->
     BitSize = byte_size(Bin) * 8,
     Suffix = <<0:(256 - BitSize)>>,
-    <<Bin/binary, Suffix/binary>>;
+    hb_util:human_id(<<Bin/binary, Suffix/binary>>);
 id(Other) ->
     hb_util:human_id(Other).
 
 account_key(Account) ->
-    hb_util:to_lower(Account).
+    lib_token:account_key(Account).
 
 ensure_lib_token() ->
     case code:ensure_loaded(lib_token) of
@@ -394,7 +394,7 @@ init_rejects_invalid_initial_balances_test() ->
             {
                 #{ MixedAlice => 7, <<" invalid">> => 3 },
                 10,
-                <<"Address cannot contain path separators or whitespaces">>
+                <<"Address contains unsupported characters.">>
             }
         ],
     lists:foreach(
@@ -458,7 +458,7 @@ balance_reserved_account_rejected_test() ->
     Opts = opts(),
     Base = token_state(#{}, Opts),
     ?assertEqual(
-        {error, <<"Address is a reserved ao/custom key">>},
+        {error, <<"Address uses the reserved path key.">>},
         public_balance(Base, <<"path">>, Opts)
     ).
 
@@ -466,7 +466,7 @@ uppercase_reserved_account_rejected_test() ->
     Opts = opts(),
     Base = token_state(#{}, Opts),
     ?assertEqual(
-        {error, <<"Address is a reserved ao/custom key">>},
+        {error, <<"Address uses the reserved path key.">>},
         public_balance(Base, <<"PATH">>, Opts)
     ),
     ?assertEqual(
