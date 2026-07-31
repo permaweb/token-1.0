@@ -4,6 +4,7 @@
 -include_lib("hb/include/hb.hrl").
 
 -define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>). 
+-define(ASSET_PROCESS, <<"aSsEt00000000000000000000000000000000000000">>).
 
 opts() ->
     hb:init(),
@@ -894,3 +895,222 @@ set_authority_match_uses_dev_security_test() ->
     {ok, Updated} =
         set_field(Base, Setter, #{ <<"logo">> => <<"logo-a">> }, Opts),
     ?assertEqual(<<"logo-a">>, hb_ao:get(<<"logo">>, Updated, Opts)).
+
+%%% Arweave-native asset composition
+
+party() ->
+    Wallet = ar_wallet:new(),
+    {Wallet, hb_util:human_id(ar_wallet:to_address(Wallet))}.
+
+asset_tx(Wallet, Fields) ->
+    hb_message:commit(
+        Fields,
+        #{ <<"priv-wallet">> => Wallet },
+        #{ <<"commitment-device">> => <<"tx@1.0">> }
+    ).
+
+asset_apply(Base, Body, Height, Opts) ->
+    {ok, Updated} =
+        dev_token:compute(
+            Base,
+            asset_assignment(Body, Height),
+            Opts
+        ),
+    Updated.
+
+asset_assignment(Body, Height) ->
+    #{
+        <<"path">> => <<"compute">>,
+        <<"process">> => ?ASSET_PROCESS,
+        <<"slot">> => Height,
+        <<"block-height">> => Height,
+        <<"body">> => Body
+    }.
+
+asset_base(Owner, Opts) ->
+    {ok, Initialized} =
+        dev_token:init(
+            #{
+                <<"device">> => <<"token@1.0">>,
+                <<"execution-device">> => <<"token@1.0">>,
+                <<"swap-device">> => <<"arweave-swap@1.0">>,
+                <<"scheduler-device">> => <<"arweave-scheduler@1.0">>,
+                <<"scheduler-mode">> => <<"all">>,
+                <<"initial-holder">> => Owner,
+                <<"total-supply">> => 1,
+                <<"denomination">> => 0
+            },
+            #{},
+            Opts
+        ),
+    Initialized.
+
+asset_balance(Base, Account, Opts) ->
+    {ok, Amount} = dev_token:balance(Base, #{ <<"balance">> => Account }, Opts),
+    Amount.
+
+asset_orders(Base, Opts) ->
+    [
+        Order
+    ||
+        Order <- hb_maps:values(
+            hb_maps:get(<<"orders">>, Base, #{}, Opts),
+            Opts
+        ),
+        is_map(Order),
+        hb_maps:get(<<"order-id">>, Order, not_found, Opts) =/= not_found
+    ].
+
+asset_offer(Wallet, Asking) ->
+    asset_tx(
+        Wallet,
+        #{
+            <<"target">> => ?ASSET_PROCESS,
+            <<"action">> => <<"make-offer">>,
+            <<"offer-quantity">> => <<"1">>,
+            <<"asking">> => hb_util:bin(Asking),
+            <<"deposit">> => <<"0">>,
+            <<"minimum-fee">> => <<"0">>,
+            <<"deadline">> => <<"20">>
+        }
+    ).
+
+asset_order_action(Wallet, Action, OrderID) ->
+    asset_tx(
+        Wallet,
+        #{
+            <<"target">> => ?ASSET_PROCESS,
+            <<"action">> => Action,
+            <<"order-id">> => OrderID
+        }
+    ).
+
+asset_payment(Wallet, Seller, Asking, OrderID) ->
+    asset_tx(
+        Wallet,
+        #{
+            <<"target">> => Seller,
+            <<"quantity">> => hb_util:bin(Asking),
+            <<"order-id">> => OrderID
+        }
+    ).
+
+scalar_initial_holder_seeds_once_test() ->
+    Opts = opts(),
+    {_, Owner} = party(),
+    {_, NewOwner} = party(),
+    Seeded = asset_base(Owner, Opts),
+    ?assertEqual(1, asset_balance(Seeded, Owner, Opts)),
+    ?assertEqual(0, asset_balance(Seeded, NewOwner, Opts)),
+    {ok, Moved} = transfer(Seeded, Owner, NewOwner, 1, Opts),
+    {ok, Reinitialized} = dev_token:init(Moved, #{}, Opts),
+    ?assertEqual(0, asset_balance(Reinitialized, Owner, Opts)),
+    ?assertEqual(1, asset_balance(Reinitialized, NewOwner, Opts)).
+
+scalar_initial_holder_requires_valid_scalars_test() ->
+    Opts = opts(),
+    {_, Owner} = party(),
+    lists:foreach(
+        fun(Base) ->
+            {ok, Initialized} = dev_token:init(Base, #{}, Opts),
+            ?assertEqual(
+                not_found,
+                hb_maps:get(<<"balances">>, Initialized, not_found, Opts)
+            )
+        end,
+        [
+            #{ <<"initial-holder">> => #{}, <<"total-supply">> => 1 },
+            #{ <<"initial-holder">> => Owner, <<"total-supply">> => <<"one">> },
+            #{ <<"initial-holder">> => Owner, <<"total-supply">> => -1 }
+        ]
+    ).
+
+swap_offer_and_cancel_round_trip_test() ->
+    Opts = opts(),
+    {Seller, SellerAddr} = party(),
+    Base = asset_base(SellerAddr, Opts),
+    Offer = asset_offer(Seller, 500),
+    ?assertMatch(
+        {ok, _},
+        hb_ao:resolve(
+            Base#{ <<"device">> => <<"arweave-swap@1.0">> },
+            asset_assignment(Offer, 100),
+            Opts
+        )
+    ),
+    Opened = asset_apply(Base, Offer, 100, Opts),
+    [Order] = asset_orders(Opened, Opts),
+    OrderID = hb_maps:get(<<"order-id">>, Order, Opts),
+    ?assertEqual(0, asset_balance(Opened, SellerAddr, Opts)),
+    ?assertEqual(<<"token@1.0">>, hb_maps:get(<<"device">>, Opened, Opts)),
+    Cancelled =
+        asset_apply(
+            Opened,
+            asset_order_action(Seller, <<"cancel-order">>, OrderID),
+            101,
+            Opts
+        ),
+    ?assertEqual([], asset_orders(Cancelled, Opts)),
+    ?assertEqual(1, asset_balance(Cancelled, SellerAddr, Opts)).
+
+swap_reserved_native_payment_settles_asset_test() ->
+    Opts = opts(),
+    {Seller, SellerAddr} = party(),
+    {Buyer, BuyerAddr} = party(),
+    Opened =
+        asset_apply(
+            asset_base(SellerAddr, Opts),
+            asset_offer(Seller, 500),
+            100,
+            Opts
+        ),
+    [Order] = asset_orders(Opened, Opts),
+    OrderID = hb_maps:get(<<"order-id">>, Order, Opts),
+    Reserved =
+        asset_apply(
+            Opened,
+            asset_order_action(Buyer, <<"register-interest">>, OrderID),
+            110,
+            Opts
+        ),
+    [Reservation] = asset_orders(Reserved, Opts),
+    ?assertEqual(
+        <<"reserved">>,
+        hb_maps:get(<<"status">>, Reservation, Opts)
+    ),
+    ?assertEqual(BuyerAddr, hb_maps:get(<<"buyer">>, Reservation, Opts)),
+    Settled =
+        asset_apply(
+            Reserved,
+            asset_payment(Buyer, SellerAddr, 500, OrderID),
+            111,
+            Opts
+        ),
+    ?assertEqual([], asset_orders(Settled, Opts)),
+    ?assertEqual(0, asset_balance(Settled, SellerAddr, Opts)),
+    ?assertEqual(1, asset_balance(Settled, BuyerAddr, Opts)),
+    ?assertEqual(<<"token@1.0">>, hb_maps:get(<<"device">>, Settled, Opts)).
+
+unrelated_all_mode_traffic_is_ignored_test() ->
+    Opts = opts(),
+    {_, Owner} = party(),
+    {Stranger, StrangerAddr} = party(),
+    Base = asset_base(Owner, Opts),
+    Result =
+        asset_apply(
+            Base,
+            asset_tx(
+                Stranger,
+                #{
+                    <<"target">> => StrangerAddr,
+                    <<"action">> => <<"make-offer">>,
+                    <<"offer-quantity">> => <<"1">>,
+                    <<"asking">> => <<"500">>
+                }
+            ),
+            100,
+            Opts
+        ),
+    ?assertEqual(1, asset_balance(Result, Owner, Opts)),
+    ?assertEqual([], asset_orders(Result, Opts)),
+    ?assertEqual([], outbox(Result, Opts)).

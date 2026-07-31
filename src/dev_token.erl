@@ -109,9 +109,9 @@ info() ->
             ]
     }.
 
-%% @doc Canonicalize account keys in the initial balance trie.
+%% @doc Seed a flat on-chain process, then canonicalize its balance trie.
 init(Base, _Req, Opts) ->
-    canonicalize_balances(Base, Opts).
+    canonicalize_balances(seed_holding(Base, Opts), Opts).
 
 %% @doc No-op on normalization.
 normalize(Base, _Req, _Opts) ->
@@ -122,14 +122,24 @@ snapshot(Base, _Req, _Opts) ->
     {ok, Base}.
 
 canonicalize_balances(Base, Opts) ->
-    case hb_maps:get(<<"balances">>, Base, not_found, Opts) of
+    case hb_maps:get(<<"swap-device">>, Base, not_found, Opts) of
         not_found ->
-            {ok, Base};
+            canonicalize_standard_balances(Base, Opts);
+        _ ->
+            % Arweave addresses are case-sensitive, and `arweave-swap@1.0'
+            % settles against the exact signer addresses carried by L1.
+            {ok, Base}
+    end.
+
+canonicalize_standard_balances(Base, Opts) ->
+    case hb_maps:get(<<"balances">>, Base, not_found, Opts) of
+        not_found -> {ok, Base};
         Balances0 ->
-            Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
-            case is_map(Balances) of
-                true -> canonicalize_balances(Base, Balances, Opts);
-                false -> {ok, Base}
+            case hb_cache:ensure_all_loaded(Balances0, Opts) of
+                Balances when is_map(Balances) ->
+                    canonicalize_balances(Base, Balances, Opts);
+                _ ->
+                    {ok, Base}
             end
     end.
 
@@ -162,12 +172,38 @@ canonicalize_balances(Base, Balances, Opts) ->
             {ok, hb_maps:put(<<"balances">>, NewBalances, Base, Opts)}
     end.
 
-%% @doc Entrypoint for computations on token processes. Deduplicates by signed
-%% assignment body, then expects the `action' key to hold the `path' to execute
-%% after enforcing the token's security constraints. Always returns the base
-%% state unmodified in the event of downstream device errors, such that invalid
-%% interactions do not result in invalid `~process@1.0' states.
+%% @doc Entrypoint for computations on token processes. A token configured with
+%% a scalar `swap-device' is scheduled in `all' mode, so every assignment is
+%% offered to that device first. Only messages addressed to this process then
+%% enter normal token routing, and the swap's own controls are not routed twice.
 compute(Base, Assignment, Opts) ->
+    case hb_maps:get(<<"swap-device">>, Base, not_found, Opts) of
+        not_found ->
+            compute_token(Base, Assignment, Opts);
+        _ ->
+            Seeded = seed_holding(Base, Opts),
+            Settled = swap(Seeded, Assignment, Opts),
+            Body = hb_maps:get(<<"body">>, Assignment, #{}, Opts),
+            ProcID = hb_maps:get(<<"process">>, Assignment, <<>>, Opts),
+            case tx_field(Body, <<"target">>, <<>>, Opts) of
+                ProcID ->
+                    case hb_util:to_lower(
+                        hb_ao:normalize_key(
+                            hb_maps:get(<<"action">>, Body, <<>>, Opts)
+                        )
+                    ) of
+                        <<"make-offer">> -> {ok, Settled};
+                        <<"cancel-order">> -> {ok, Settled};
+                        <<"register-interest">> -> {ok, Settled};
+                        _ -> compute_token(Settled, Assignment, Opts)
+                    end;
+                _ ->
+                    {ok, Settled}
+            end
+    end.
+
+%% @doc Normal token routing for an addressed assignment.
+compute_token(Base, Assignment, Opts) ->
     ?event({token_call, Assignment}),
     case deduplicate(Base, Assignment, Opts) of
         {skip, DedupedBase} ->
@@ -188,6 +224,61 @@ compute(Base, Assignment, Opts) ->
         {error, Reason} ->
             ?event(token_short, {error_during_token_dedup, Reason}, Opts),
             send_error(Base, Assignment, Reason, Opts)
+    end.
+
+%% @doc Hand every scheduled assignment to the configured selling device and
+%% take back the resulting token state. This is the scalar equivalent of a
+%% device stack, matching `carrier@1.0': nested stack configuration cannot be
+%% represented by flat Arweave transaction tags.
+swap(Base, Assignment, Opts) ->
+    Device = hb_maps:get(<<"swap-device">>, Base, not_found, Opts),
+    try hb_ao:resolve(Base#{ <<"device">> => Device }, Assignment, Opts) of
+        {ok, Settled} -> Settled#{ <<"device">> => <<"token@1.0">> };
+        _ -> Base
+    catch
+        _:_ -> Base
+    end.
+
+%% @doc Give a flat on-chain process its initial supply once. `initial-holder'
+%% and `total-supply' are scalars that survive an Arweave process transaction;
+%% `balances' is a submessage and does not.
+seed_holding(Base, Opts) ->
+    case {
+        hb_maps:get(<<"initial-holder">>, Base, not_found, Opts),
+        hb_maps:get(<<"balances">>, Base, not_found, Opts)
+    } of
+        {not_found, _} ->
+            Base;
+        {_, Balances} when Balances =/= not_found ->
+            Base;
+        {Holder, not_found} when is_binary(Holder) ->
+            case hb_util:safe_int(
+                hb_maps:get(<<"total-supply">>, Base, 1, Opts)
+            ) of
+                {ok, Supply} when Supply >= 0 ->
+                    Base#{
+                        <<"balances">> => #{ Holder => Supply }
+                    };
+                _ ->
+                    Base
+            end;
+        _ ->
+            Base
+    end.
+
+%% @doc Read a value from the real L1 transaction fields recorded in its
+%% `tx@1.0' commitment. A top-level key can be an ordinary tag with the same
+%% spelling and is not proof that value moved to that address.
+tx_field(Body, Field, Default, Opts) ->
+    case hb_message:commitment(
+        #{ <<"commitment-device">> => <<"tx@1.0">> },
+        Body,
+        Opts
+    ) of
+        {ok, _ID, Commitment} ->
+            hb_maps:get(<<"field-", Field/binary>>, Commitment, Default, Opts);
+        _ ->
+            Default
     end.
 
 %% @doc Deduplicate token computations by the signed assignment body. Replayed
@@ -237,7 +328,7 @@ balance(Base, Req, Opts) ->
     maybe
         {ok, Account0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
         true ?= validate_address(Account0, [], Opts),
-        Account = account_key(Account0),
+        Account = state_account_key(Base, Account0, Opts),
         ?event(
             debug_token,
             {balance_request,
@@ -287,8 +378,8 @@ transfer(Base, Assignment, Opts) ->
         % validate From/Recipient sanity
         true ?= validate_address(From0, [], Opts),
         true ?= validate_address(Recipient0, [], Opts),
-        From = account_key(From0),
-        Recipient = account_key(Recipient0),
+        From = state_account_key(Base, From0, Opts),
+        Recipient = state_account_key(Base, Recipient0, Opts),
         % Normalize the base's minting state for the sender.
         {ok, NormBase} ?=
             normalize_mint(
@@ -398,7 +489,7 @@ mint(Base, Assignment, Opts) ->
                             hb_ao:set(
                                 Assignment,
                                 <<"subject">>,
-                                account_key(Subject),
+                                state_account_key(Base, Subject, Opts),
                                 Opts
                             ),
                         as_mint_device(<<"mint">>, Base, MintReq1, Opts)
@@ -561,6 +652,12 @@ validate_address(_, _, _) ->
 
 account_key(Address) when is_binary(Address) ->
     hb_util:to_lower(Address).
+
+state_account_key(Base, Address, Opts) ->
+    case hb_maps:get(<<"swap-device">>, Base, not_found, Opts) of
+        not_found -> account_key(Address);
+        _ -> Address
+    end.
 
 trie_keys(Balances, Opts) ->
     {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
