@@ -995,6 +995,17 @@ asset_payment(Wallet, Seller, Asking, OrderID) ->
         }
     ).
 
+asset_transfer(Wallet, Recipient) ->
+    asset_tx(
+        Wallet,
+        #{
+            <<"target">> => ?ASSET_PROCESS,
+            <<"action">> => <<"transfer">>,
+            <<"recipient">> => Recipient,
+            <<"quantity">> => <<"1">>
+        }
+    ).
+
 scalar_initial_holder_seeds_once_test() ->
     Opts = opts(),
     {_, Owner} = party(),
@@ -1006,6 +1017,20 @@ scalar_initial_holder_seeds_once_test() ->
     {ok, Reinitialized} = dev_token:init(Moved, #{}, Opts),
     ?assertEqual(0, asset_balance(Reinitialized, Owner, Opts)),
     ?assertEqual(1, asset_balance(Reinitialized, NewOwner, Opts)).
+
+swap_asset_transfer_updates_live_owner_test() ->
+    Opts = opts(),
+    {OwnerWallet, Owner} = party(),
+    {_, Recipient} = party(),
+    Transferred =
+        asset_apply(
+            asset_base(Owner, Opts),
+            asset_transfer(OwnerWallet, Recipient),
+            100,
+            Opts
+        ),
+    ?assertEqual(0, asset_balance(Transferred, Owner, Opts)),
+    ?assertEqual(1, asset_balance(Transferred, Recipient, Opts)).
 
 scalar_initial_holder_requires_valid_scalars_test() ->
     Opts = opts(),

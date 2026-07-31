@@ -374,7 +374,12 @@ transfer(Base, Assignment, Opts) ->
         {ok, Req} ?= hb_ao:resolve(Assignment, <<"body">>, Opts),
         {ok, From0} ?= hb_ao:resolve(Req, <<"from">>, Opts),
         {ok, Recipient0} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
-        {ok, Quantity} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
+        {ok, Quantity0} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
+        Quantity =
+            case hb_util:safe_int(Quantity0) of
+                {ok, Integer} -> Integer;
+                _ -> Quantity0
+            end,
         % validate From/Recipient sanity
         true ?= validate_address(From0, [], Opts),
         true ?= validate_address(Recipient0, [], Opts),
