@@ -25,9 +25,9 @@ non-negative `total-supply` equal to their sum. Invalid genesis state fails clos
 ```bash
 Published device: token@1.0; 
 
-Specification ID: KHSPOf6n-B6EXKF-9adTYzo6S_Sl3_GY1Qy0f4sL_QQ; 
+Specification ID: nUrsJwYB4BEOS0ZKKGtRsQf8kxupjWdYrlYcBZNW3U8; 
 
-Implementation ID: mwLP8r5OobCcudFPJJeRs6XepmkoZy5ZW9R8BXs3bFg; 
+Implementation ID: dYq-4NC3y3XjpMbUG41ROYcCRHdA8wpaXPJ5_FZeQDk; 
 
 Signer: vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0;
 ```
@@ -51,7 +51,7 @@ src:
   "trusted-devices": {
     "mint-authority@1.0": "uzHd158Q7i40TDjwsbGAB88E_idazRRIBctTq_rLzGo",
     "process-outbox@1.0": "HOcPV7wxMHYb3rSQ3EfykQhHx_b8waRWhXolhcBNgHo",
-    "security@1.0": "7jivsYHKbkfca8emXGepD-T0KQ6cI7ehGLeU3Mn8g6M"
+    "security@1.0": "RrkCKxGm72vA9tuDAxKSgDzfvdDhwk1dM0g2ZWmtRKI"
   }
 }
 ```
