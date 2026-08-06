@@ -337,6 +337,43 @@ scheduled_non_compute_paths_rejected_test() ->
         )
     ).
 
+all_mode_unrelated_target_assignment_is_ignored_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 100 },
+                extra =>
+                    #{
+                        <<"scheduler-device">> => <<"arweave-scheduler@1.0">>,
+                        <<"scheduler-mode">> => <<"all">>
+                    }
+            },
+            Opts
+        ),
+    Assignment =
+        #{
+            <<"path">> => <<"compute">>,
+            <<"type">> => <<"Assignment">>,
+            <<"slot">> => 42,
+            <<"body">> =>
+                #{
+                    <<"target">> => id(<<"other-process">>),
+                    <<"action">> => <<"transfer">>,
+                    <<"from">> => Alice,
+                    <<"recipient">> => Bob,
+                    <<"quantity">> => 10
+                }
+        },
+    {ok, Ignored} = dev_token:compute(Base, Assignment, Opts),
+    ?assertEqual(Base, Ignored),
+    ?assertEqual(100, balance(Ignored, Alice, Opts)),
+    ?assertEqual(0, balance(Ignored, Bob, Opts)),
+    ?assertEqual(not_found, hb_ao:get(<<"dedup">>, Ignored, not_found, Opts)),
+    ?assertEqual(not_found, hb_ao:get(<<"results/outbox">>, Ignored, not_found, Opts)).
+
 mixed_case_initial_balance_uses_canonical_account_test() ->
     Opts = opts(),
     Alice = id(<<"Alice">>),
@@ -387,7 +424,7 @@ init_rejects_invalid_initial_balances_test() ->
                 <<"Balance amounts must be non-negative integers.">>
             },
             {
-                #{ MixedAlice => 7, Bob => <<"3">> },
+                #{ MixedAlice => 7, Bob => <<"three">> },
                 10,
                 <<"Balance amounts must be non-negative integers.">>
             },
@@ -431,7 +468,7 @@ init_rejects_invalid_total_supply_test() ->
                 dev_token:init(Base, #{}, Opts)
             )
         end,
-        [-1, <<"7">>]
+        [-1, <<"seven">>]
     ),
     Mismatched =
         raw_token_state(
@@ -442,6 +479,20 @@ init_rejects_invalid_total_supply_test() ->
         {error, <<"Total supply does not match balances.">>},
         dev_token:init(Mismatched, #{}, Opts)
     ).
+
+init_seeds_initial_holder_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Base =
+        raw_token_state(
+            #{
+                <<"initial-holder">> => Alice,
+                <<"total-supply">> => <<"7">>
+            },
+            Opts
+        ),
+    {ok, Initialized} = dev_token:init(Base, #{}, Opts),
+    ?assertEqual({ok, 7}, public_balance(Initialized, Alice, Opts)).
 
 balance_missing_account_returns_zero_test() ->
     Opts = opts(),

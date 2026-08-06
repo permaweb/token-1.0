@@ -147,7 +147,7 @@ snapshot(Base, _Req, _Opts) ->
 
 canonicalize_balances(Base, Opts) ->
     maybe
-        Balances0 = hb_maps:get(<<"balances">>, Base, not_found, Opts),
+        Balances0 = initial_balances(Base, Opts),
         true ?= (Balances0 =/= not_found) orelse
             {error, <<"Balances not found.">>},
         Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
@@ -156,11 +156,25 @@ canonicalize_balances(Base, Opts) ->
         canonicalize_balances(Base, Balances, Opts)
     end.
 
+initial_balances(Base, Opts) ->
+    case hb_maps:get(<<"balances">>, Base, not_found, Opts) of
+        not_found ->
+            case hb_maps:get(<<"initial-holder">>, Base, not_found, Opts) of
+                not_found -> not_found;
+                Holder ->
+                    #{Holder => hb_maps:get(<<"total-supply">>, Base, not_found, Opts)}
+            end;
+        Balances ->
+            Balances
+    end.
+
 canonicalize_balances(Base, Balances, Opts) ->
     maybe
-        TotalSupply = hb_ao:get(<<"total-supply">>, Base, not_found, Opts),
-        true ?= (is_integer(TotalSupply) andalso TotalSupply >= 0) orelse
-            {error, <<"Total supply must be a non-negative integer.">>},
+        {ok, TotalSupply} ?=
+            nonneg_int(
+                hb_ao:get(<<"total-supply">>, Base, not_found, Opts),
+                <<"Total supply must be a non-negative integer.">>
+            ),
         {ok, Changed, FlatBalances} ?=
             lists:foldl(
                 fun
@@ -169,10 +183,12 @@ canonicalize_balances(Base, Balances, Opts) ->
                     (Key, {ok, ChangedAcc, BalancesAcc}) ->
                         maybe
                             true ?= lib_token:validate_address(Key, [], Opts),
-                            {ok, Amount} ?= hb_ao:resolve(Balances, Key, Opts),
-                            true ?=
-                                (is_integer(Amount) andalso Amount >= 0) orelse
-                                    {error, <<"Balance amounts must be non-negative integers.">>},
+                            {ok, Amount0} ?= hb_ao:resolve(Balances, Key, Opts),
+                            {ok, Amount} ?=
+                                nonneg_int(
+                                    Amount0,
+                                    <<"Balance amounts must be non-negative integers.">>
+                                ),
                             Account = lib_token:account_key(Key),
                             {
                                 ok,
@@ -209,26 +225,51 @@ canonicalize_balances(Base, Balances, Opts) ->
 %% interactions do not result in invalid `~process@1.0' states.
 compute(Base, Assignment, Opts) ->
     ?event({token_call, Assignment}),
-    case deduplicate(Base, Assignment, Opts) of
-        {skip, DedupedBase} ->
-            ?event(token_short, {skipping_duplicate_assignment, Assignment}, Opts),
-            {ok, DedupedBase};
-        {ok, DedupedBase} ->
-            maybe
-                {ok, SecureReq} ?= enforce_security(DedupedBase, Assignment, Opts),
-                {ok, Action} ?= hb_ao:resolve(Assignment, <<"body/action">>, Opts),
-                {ok, Res} ?= handle_action(Action, DedupedBase, SecureReq, Opts),
-                ?event(debug_token, {route_result, Res}, Opts),
-                {ok, Res}
-            else
+    case assignment_targets_process(Base, Assignment, Opts) of
+        true ->
+            case deduplicate(Base, Assignment, Opts) of
+                {skip, DedupedBase} ->
+                    ?event(token_short, {skipping_duplicate_assignment, Assignment}, Opts),
+                    {ok, DedupedBase};
+                {ok, DedupedBase} ->
+                    maybe
+                        {ok, SecureReq} ?= enforce_security(DedupedBase, Assignment, Opts),
+                        {ok, Action} ?= hb_ao:resolve(Assignment, <<"body/action">>, Opts),
+                        {ok, Res} ?= handle_action(Action, DedupedBase, SecureReq, Opts),
+                        ?event(debug_token, {route_result, Res}, Opts),
+                        {ok, Res}
+                    else
+                        {error, Reason} ->
+                            ?event(token_short, {error_during_token_call, Reason}, Opts),
+                            send_error(Base, Assignment, Reason, Opts)
+                    end;
                 {error, Reason} ->
-                    ?event(token_short, {error_during_token_call, Reason}, Opts),
+                    ?event(token_short, {error_during_token_dedup, Reason}, Opts),
                     send_error(Base, Assignment, Reason, Opts)
             end;
-        {error, Reason} ->
-            ?event(token_short, {error_during_token_dedup, Reason}, Opts),
-            send_error(Base, Assignment, Reason, Opts)
+        false ->
+            ?event(token_short, {skipping_non_target_assignment, Assignment}, Opts),
+            {ok, Base}
     end.
+
+assignment_targets_process(Base, Assignment, Opts) ->
+    case all_mode_arweave_scheduler(Base, Opts) of
+        true ->
+            case hb_ao:resolve(Assignment, <<"body/target">>, Opts) of
+                {ok, Target} -> Target =:= current_process_id(Base, Opts);
+                {error, _} -> false
+            end;
+        _ ->
+            true
+    end.
+
+all_mode_arweave_scheduler(Base, Opts) ->
+    hb_maps:get(<<"scheduler-device">>, Base, not_found, Opts) =:= <<"arweave-scheduler@1.0">>
+        andalso hb_maps:get(<<"scheduler-mode">>, Base, not_found, Opts) =:= <<"all">>.
+
+current_process_id(Base, Opts) ->
+    Msg = hb_ao:get(<<"process">>, ensure_process_key(Base, Opts), Opts),
+    hb_message:id(Msg, signed, Opts).
 
 %% @doc Deduplicate token computations by the signed assignment body. Replayed
 %% assignments get fresh slots, so the assignment itself cannot be the subject.
@@ -330,10 +371,13 @@ transfer(Base, Assignment, Opts) ->
         {ok, Req} ?= hb_ao:resolve(Assignment, <<"body">>, Opts),
         {ok, From0} ?= hb_ao:resolve(Req, <<"from">>, Opts),
         {ok, Recipient0} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
-        {ok, Quantity} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
+        {ok, Quantity0} ?= action_field(Req, <<"quantity">>, Opts),
+        {ok, Quantity} ?=
+            nonneg_int(
+                Quantity0,
+                <<"Quantity must be a non-negative integer.">>
+            ),
         true ?= transfer_enabled(Base, Opts),
-        true ?= (is_integer(Quantity) and (Quantity >= 0))
-            orelse {error, <<"Quantity must be a non-negative integer.">>},
         % validate From/Recipient sanity
         true ?= lib_token:validate_address(From0, [], Opts),
         true ?= lib_token:validate_address(Recipient0, [], Opts),
@@ -345,7 +389,9 @@ transfer(Base, Assignment, Opts) ->
                 0 -> {ok, Base};
                 _ -> normalize_mint(
                     Base,
-                    Assignment#{ <<"subject">> => From },
+                    Assignment#{
+                        <<"body">> => hb_ao:set(Req, <<"subject">>, From, Opts)
+                    },
                     Opts
                 )
             end,
@@ -764,4 +810,42 @@ send_error(Base, Assignment, Reason, Opts) when is_binary(Reason) ->
                 Base,
                 Opts
             )
+    end.
+
+action_field(Msg, Key, Opts) ->
+    case tag_field(Msg, Key, Opts) of
+        not_found -> hb_ao:resolve(Msg, Key, Opts);
+        Value -> {ok, Value}
+    end.
+
+tag_field(Msg, Key, Opts) ->
+    case hb_message:commitment(#{ <<"commitment-device">> => <<"tx@1.0">> }, Msg, Opts) of
+        {ok, _ID, Commitment} ->
+            case hb_maps:get(<<"original-tags">>, Commitment, not_found, Opts) of
+                Tags when is_map(Tags) -> tag_value(Tags, Key, Opts);
+                _ -> not_found
+            end;
+        _ ->
+            not_found
+    end.
+
+tag_value(Tags, Key, Opts) ->
+    hb_maps:fold(
+        fun(_Index, #{ <<"name">> := Name, <<"value">> := Value }, not_found) ->
+                case hb_util:to_lower(Name) =:= Key of
+                    true -> Value;
+                    false -> not_found
+                end;
+            (_Index, _Tag, Acc) ->
+                Acc
+        end,
+        not_found,
+        Tags,
+        Opts
+    ).
+
+nonneg_int(Value, Error) ->
+    case hb_util:safe_int(Value) of
+        {ok, Int} when Int >= 0 -> {ok, Int};
+        _ -> {error, Error}
     end.
