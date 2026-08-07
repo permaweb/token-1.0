@@ -255,10 +255,8 @@ compute(Base, Assignment, Opts) ->
 assignment_targets_process(Base, Assignment, Opts) ->
     case all_mode_arweave_scheduler(Base, Opts) of
         true ->
-            case hb_ao:resolve(Assignment, <<"body/target">>, Opts) of
-                {ok, Target} -> Target =:= current_process_id(Base, Opts);
-                {error, _} -> false
-            end;
+            Body = hb_maps:get(<<"body">>, Assignment, #{}, Opts),
+            tx_field(Body, <<"target">>, <<>>, Opts) =:= current_process_id(Base, Opts);
         _ ->
             true
     end.
@@ -830,19 +828,35 @@ tag_field(Msg, Key, Opts) ->
     end.
 
 tag_value(Tags, Key, Opts) ->
-    hb_maps:fold(
-        fun(_Index, #{ <<"name">> := Name, <<"value">> := Value }, not_found) ->
+    Matches =
+        hb_maps:fold(
+            fun(_Index, #{ <<"name">> := Name, <<"value">> := Value }, Acc) ->
                 case hb_util:to_lower(Name) =:= Key of
-                    true -> Value;
-                    false -> not_found
+                    true -> [Value | Acc];
+                    false -> Acc
                 end;
             (_Index, _Tag, Acc) ->
                 Acc
-        end,
-        not_found,
-        Tags,
-        Opts
-    ).
+            end,
+            [],
+            Tags,
+            Opts
+        ),
+    case Matches of
+        [Value] -> Value;
+        _ -> not_found
+    end.
+
+%% @doc Read a value from the real L1 transaction fields recorded in the
+%% `tx@1.0' commitment. Top-level keys may come from tags with the same names,
+%% so all-mode process routing must not use them.
+tx_field(Body, Field, Default, Opts) ->
+    case hb_message:commitment(#{ <<"commitment-device">> => <<"tx@1.0">> }, Body, Opts) of
+        {ok, _ID, Commitment} ->
+            hb_maps:get(<<"field-", Field/binary>>, Commitment, Default, Opts);
+        _ ->
+            Default
+    end.
 
 nonneg_int(Value, Error) ->
     case hb_util:safe_int(Value) of

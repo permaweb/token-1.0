@@ -219,6 +219,14 @@ transfer(State, From, To, Quantity, Opts) ->
         Opts
     ).
 
+tag_only_tx(Wallet, Tags) ->
+    Signed = ar_tx:sign(#tx{ format = 2, reward = 1, tags = Tags }, Wallet),
+    hb_message:convert(Signed, <<"structured@1.0">>, <<"tx@1.0">>, #{}).
+
+process_id(Process, Opts) ->
+    {ok, Committed} = hb_message:with_only_committed(Process, Opts),
+    hb_message:id(Committed, signed, Opts).
+
 mint(State, From, Recipient, Quantity, Opts) ->
     mint(State, From, Recipient, Quantity, next_mint_nonce(State, Opts), Opts).
 
@@ -373,6 +381,86 @@ all_mode_unrelated_target_assignment_is_ignored_test() ->
     ?assertEqual(0, balance(Ignored, Bob, Opts)),
     ?assertEqual(not_found, hb_ao:get(<<"dedup">>, Ignored, not_found, Opts)),
     ?assertEqual(not_found, hb_ao:get(<<"results/outbox">>, Ignored, not_found, Opts)).
+
+all_mode_tag_only_target_assignment_is_ignored_test() ->
+    Opts = opts(),
+    AliceWallet = ar_wallet:new(),
+    Alice = hb_util:human_id(ar_wallet:to_address(AliceWallet)),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 100 },
+                extra =>
+                    #{
+                        <<"scheduler-device">> => <<"arweave-scheduler@1.0">>,
+                        <<"scheduler-mode">> => <<"all">>,
+                        <<"security-device">> => <<"security@1.0">>
+                    }
+            },
+            Opts
+        ),
+    ProcessID = process_id(Base, Opts),
+    Body =
+        tag_only_tx(
+            AliceWallet,
+            [
+                {<<"target">>, ProcessID},
+                {<<"action">>, <<"transfer">>},
+                {<<"recipient">>, Bob},
+                {<<"quantity">>, <<"10">>}
+            ]
+        ),
+    Assignment =
+        #{
+            <<"path">> => <<"compute">>,
+            <<"type">> => <<"Assignment">>,
+            <<"slot">> => 43,
+            <<"process">> => ProcessID,
+            <<"body">> => Body
+        },
+    ?assertEqual(ProcessID, hb_ao:get(<<"target">>, Body, not_found, Opts)),
+    {ok, Ignored} = dev_token:compute(Base, Assignment, Opts),
+    ?assertEqual(Base, Ignored),
+    ?assertEqual(100, balance(Ignored, Alice, Opts)),
+    ?assertEqual(0, balance(Ignored, Bob, Opts)),
+    ?assertEqual(not_found, hb_ao:get(<<"dedup">>, Ignored, not_found, Opts)).
+
+duplicate_quantity_tags_are_not_first_match_transfer_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 100 }
+            },
+            Opts
+        ),
+    Body0 =
+        hb_message:convert(
+            #tx{
+                format = 2,
+                tags =
+                    [
+                        {<<"recipient">>, Bob},
+                        {<<"quantity">>, <<"10">>},
+                        {<<"Quantity">>, <<"90">>}
+                    ]
+            },
+            <<"structured@1.0">>,
+            <<"tx@1.0">>,
+            Opts
+        ),
+    {ok, Ignored} =
+        dev_token:handle_action(
+            <<"transfer">>,
+            Base,
+            #{ <<"body">> => Body0#{ <<"from">> => Alice } },
+            Opts
+        ),
+    ?assertEqual(100, balance(Ignored, Alice, Opts)),
+    ?assertEqual(0, balance(Ignored, Bob, Opts)).
 
 mixed_case_initial_balance_uses_canonical_account_test() ->
     Opts = opts(),
