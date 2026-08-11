@@ -403,10 +403,10 @@ balances(Prefix, ProcMsg, Opts) ->
     ).
 
 balance(ID, ProcMsg, Opts) ->
-    Account = account_key(ID),
-    case hb_ao:get(<<"balances/", Account/binary>>, ProcMsg, not_found, Opts) of
+    IDKey = id_key(ID),
+    case hb_ao:get(<<"balances/", IDKey/binary>>, ProcMsg, not_found, Opts) of
         not_found ->
-            case hb_ao:get(<<"balance/", Account/binary>>, ProcMsg, not_found, Opts) of
+            case hb_ao:get(<<"balance/", IDKey/binary>>, ProcMsg, not_found, Opts) of
                 not_found ->
                     case hb_ao:get(<<"balances/", ID/binary>>, ProcMsg, not_found, Opts) of
                         not_found ->
@@ -423,15 +423,15 @@ balance(ID, ProcMsg, Opts) ->
 
 canonical_balances(Balances) ->
     maps:fold(
-        fun(Account, Amount, Acc) when is_number(Amount) ->
-            Key = account_key(Account),
+        fun(ID, Amount, Acc) when is_number(Amount) ->
+            Key = id_key(ID),
             Acc#{ Key => maps:get(Key, Acc, 0) + Amount };
-            (_Account, _Amount, Acc) ->
+            (_ID, _Amount, Acc) ->
                 Acc
         end,
         #{},
         Balances
     ).
 
-account_key(Account) when is_binary(Account) ->
-    hb_util:to_lower(Account).
+id_key(ID) when is_binary(ID) ->
+    hb_util:to_lower(ID).

@@ -152,8 +152,8 @@ schedule_and_compute(Process, Body, BodyWallets, RequestWallet, Opts) ->
         ),
     {Slot, Computed}.
 
-balance(Process, Account, Opts) ->
-    dev_token_lib:balance(Process, Account, Opts).
+balance(Process, ID, Opts) ->
+    dev_token_lib:balance(Process, ID, Opts).
 
 state_field(Process, Key, Default, Opts) ->
     hb_ao:get(<<"now/", Key/binary>>, Process, Default, Opts).

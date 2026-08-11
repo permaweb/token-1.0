@@ -133,7 +133,7 @@ is_compute_path(Req, Opts) ->
         _ -> false
     end.
 
-%% @doc Validate initial supply and canonicalize account keys.
+%% @doc Validate initial supply and canonicalize balance-holder ID keys.
 init(Base, _Req, Opts) ->
     canonicalize_balances(Base, Opts).
 
@@ -189,13 +189,13 @@ canonicalize_balances(Base, Balances, Opts) ->
                                     Amount0,
                                     <<"Balance amounts must be non-negative integers.">>
                                 ),
-                            Account = lib_token:account_key(Key),
+                            ID = id_key(Key),
                             {
                                 ok,
                                 ChangedAcc
-                                    orelse (Account =/= Key)
-                                    orelse maps:is_key(Account, BalancesAcc),
-                                add_balance(Account, Amount, BalancesAcc)
+                                    orelse (ID =/= Key)
+                                    orelse maps:is_key(ID, BalancesAcc),
+                                add_balance(ID, Amount, BalancesAcc)
                             }
                         end
                 end,
@@ -317,18 +317,18 @@ handle_action(Action, Base, Req, Opts) when is_binary(Action) ->
 handle_action(_Action, _Base, _Req, _Opts) ->
     {error, <<"Invalid Action format">>}.
 
-%% @doc Get the balance for an account. Normalize the minting state for that
-%% account before returning.
+%% @doc Get the balance for an ID. Normalize the minting state for that ID
+%% before returning.
 balance(Base, Req, Opts) ->
     maybe
-        {ok, Account0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
-        true ?= lib_token:validate_address(Account0, [], Opts),
-        Account = lib_token:account_key(Account0),
+        {ok, ID0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
+        true ?= lib_token:validate_address(ID0, [], Opts),
+        ID = id_key(ID0),
         ?event(
             debug_token,
             {balance_request,
-                {account, Account0},
-                {canonical_account, Account},
+                {id, ID0},
+                {canonical_id, ID},
                 {base, Base}
             },
             Opts
@@ -336,7 +336,7 @@ balance(Base, Req, Opts) ->
         {ok, NormBase} ?=
             normalize_mint(
                 Base,
-                hb_ao:set(Req, <<"subject">>, Account, Opts),
+                hb_ao:set(Req, <<"subject">>, ID, Opts),
                 Opts
             ),
         BalanceRes =
@@ -344,14 +344,14 @@ balance(Base, Req, Opts) ->
                 [
                     NormBase,
                     <<"balances">>,
-                    Account
+                    ID
                 ],
                 Opts
             ),
         ?event(
             debug_token,
             {balance_after_mint_normalization,
-                {account, Account},
+                {id, ID},
                 {balance, BalanceRes}
             },
             Opts
@@ -379,8 +379,8 @@ transfer(Base, Assignment, Opts) ->
         % validate From/Recipient sanity
         true ?= lib_token:validate_address(From0, [], Opts),
         true ?= lib_token:validate_address(Recipient0, [], Opts),
-        From = lib_token:account_key(From0),
-        Recipient = lib_token:account_key(Recipient0),
+        From = id_key(From0),
+        Recipient = id_key(Recipient0),
         % Normalize the base's minting state for the sender.
         {ok, NormBase} ?=
             case Quantity of
@@ -507,7 +507,7 @@ mint_request(Base, Assignment, Opts) ->
                             hb_ao:set(
                                 Assignment,
                                 <<"subject">>,
-                                lib_token:account_key(Subject),
+                                id_key(Subject),
                                 Opts
                             ),
                         as_mint_device(<<"mint">>, Base, MintReq1, Opts)
@@ -646,8 +646,11 @@ trie_keys(Balances, Opts) ->
     {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
     Trie:keys(Balances, Opts).
 
-add_balance(Account, Amount, Balances) ->
-    Balances#{ Account => maps:get(Account, Balances, 0) + Amount }.
+id_key(ID) when is_binary(ID) ->
+    hb_util:to_lower(hb_ao:normalize_key(ID)).
+
+add_balance(ID, Amount, Balances) ->
+    Balances#{ ID => maps:get(ID, Balances, 0) + Amount }.
 
 outbox_send(Messages, Base, Opts) ->
     maybe

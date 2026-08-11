@@ -212,18 +212,18 @@ process_id(Process, Req, Opts) ->
             )
     end.
 
-%% @doc Retreive a single balance from the ledger.
+%% @doc Retrieve a single ID balance from the ledger.
 balance(ProcMsg, User, Opts) when not ?IS_ID(User) ->
     balance(ProcMsg, hb_util:human_id(ar_wallet:to_address(User)), Opts);
 balance(ProcMsg, ID, Opts) ->
-    Account = account_key(ID),
-    case hb_ao:get(<<"now/balances/", Account/binary>>, ProcMsg, not_found, Opts) of
+    IDKey = id_key(ID),
+    case hb_ao:get(<<"now/balances/", IDKey/binary>>, ProcMsg, not_found, Opts) of
         not_found -> hb_ao:get(<<"now/balances/", ID/binary>>, ProcMsg, 0, Opts);
         Balance -> Balance
     end.
 
 %% @doc Retrieve a single balance through the execution device's `balance`
-%% path, allowing lazy mint devices to normalize account state first.
+%% path, allowing lazy mint devices to normalize ID state first.
 normalized_balance(ProcMsg, User, Opts) when not ?IS_ID(User) ->
     normalized_balance(ProcMsg, hb_util:human_id(ar_wallet:to_address(User)), Opts);
 normalized_balance(ProcMsg, ID, Opts) ->
@@ -490,16 +490,16 @@ normalize_env(Procs) when is_list(Procs) ->
 normalize_without_root(RootProc, Procs) ->
     maps:without([hb_message:id(RootProc, all)], normalize_env(Procs)).
 
-account_key(Account) when is_binary(Account) ->
-    lib_token:account_key(Account).
+id_key(ID) when is_binary(ID) ->
+    hb_util:to_lower(hb_ao:normalize_key(ID)).
 
 canonical_balances(Balances) ->
     lists:foldl(
         fun
             ({ID, Amount}, Acc) when ?IS_ID(ID) ->
-                add_balance(account_key(hb_util:human_id(ID)), Amount, Acc);
+                add_balance(id_key(hb_util:human_id(ID)), Amount, Acc);
             ({Wallet, Amount}, Acc) when is_tuple(Wallet) ->
-                add_balance(account_key(hb_util:human_id(Wallet)), Amount, Acc);
+                add_balance(id_key(hb_util:human_id(Wallet)), Amount, Acc);
             (_Other, Acc) ->
                 Acc
         end,
@@ -507,5 +507,5 @@ canonical_balances(Balances) ->
         maps:to_list(Balances)
     ).
 
-add_balance(Account, Amount, Balances) ->
-    Balances#{ Account => maps:get(Account, Balances, 0) + Amount }.
+add_balance(ID, Amount, Balances) ->
+    Balances#{ ID => maps:get(ID, Balances, 0) + Amount }.
