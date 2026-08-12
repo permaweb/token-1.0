@@ -19,15 +19,30 @@ rebar3 eunit-all
 
 Initialization requires valid addresses with non-negative integer balances and a
 non-negative `total-supply` equal to their sum. Invalid genesis state fails closed.
+Tokens configured with `swap-device` retain exact, case-sensitive balance keys.
+
+## swap-device compatibility
+
+When `swap-device` is configured, every scheduled assignment is settled by that
+device before token execution. `Make-Offer`, `Cancel-Order`, and
+`Register-Interest` are owned by the swap device and do not fall through to the
+token's mint-device hook. Non-target L1 transactions are settled without running
+token semantics; process-targeted token actions continue through deduplication,
+security, outbox, and mint-authority handling.
+
+Routing uses the real L1 transaction target recorded by `tx@1.0`, rather than a
+projected `Target` tag. The node must provide or pin the implementation named by
+`swap-device` (for Bazar, `arweave-swap@1.0`); it is not bundled in this token
+package.
 
 ## published package
 
 ```bash
 Published device: token@1.0; 
 
-Specification ID: pXHakE4TUBUBg4JFnsCmcvXSis7WMXsUtAP5AzOqmjc;
+Specification ID: PQm3ftLi1wuT0-xqjj0j6YzF52uJ_X7_1GkN7JsEJgw;
 
-Implementation ID: PcMKkrsgVld-4JR63GnRaumlqm1icACGDPUGm86wB1I;
+Implementation ID: HNLs3OvUFeVwb0XP2pIuopycIis4GyuHqEkmTRSyCe8;
 
 Signer: vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0;
 ```

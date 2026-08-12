@@ -223,6 +223,19 @@ tag_only_tx(Wallet, Tags) ->
     Signed = ar_tx:sign(#tx{ format = 2, reward = 1, tags = Tags }, Wallet),
     hb_message:convert(Signed, <<"structured@1.0">>, <<"tx@1.0">>, #{}).
 
+targeted_tx(Wallet, Target, Tags) ->
+    Signed =
+        ar_tx:sign(
+            #tx{
+                format = 2,
+                reward = 1,
+                target = hb_util:native_id(Target),
+                tags = Tags
+            },
+            Wallet
+        ),
+    hb_message:convert(Signed, <<"structured@1.0">>, <<"tx@1.0">>, #{}).
+
 process_id(Process, Opts) ->
     {ok, Committed} = hb_message:with_only_committed(Process, Opts),
     hb_message:id(Committed, signed, Opts).
@@ -426,6 +439,144 @@ all_mode_tag_only_target_assignment_is_ignored_test() ->
     ?assertEqual(0, balance(Ignored, Bob, Opts)),
     ?assertEqual(not_found, hb_ao:get(<<"dedup">>, Ignored, not_found, Opts)).
 
+swap_owned_action_is_settled_without_token_execution_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 100 },
+                extra =>
+                    #{
+                        <<"swap-device">> => <<"test-device@1.0">>,
+                        <<"already-seen">> => []
+                    }
+            },
+            Opts
+        ),
+    ProcessID = process_id(Base, Opts),
+    Body =
+        targeted_tx(
+            ar_wallet:new(),
+            ProcessID,
+            [{<<"action">>, <<"Make-Offer">>}]
+        ),
+    Assignment =
+        #{
+            <<"path">> => <<"compute">>,
+            <<"type">> => <<"Assignment">>,
+            <<"slot">> => 44,
+            <<"process">> => ProcessID,
+            <<"body">> => Body
+        },
+    {ok, Settled} = dev_token:compute(Base, Assignment, Opts),
+    ?assertEqual(<<"token@1.0">>, hb_ao:get(<<"device">>, Settled, Opts)),
+    ?assertEqual(<<"random-value">>, hb_ao:get(<<"random-key">>, Settled, Opts)),
+    ?assertEqual(44, hb_ao:get(<<"results/assignment-slot">>, Settled, Opts)),
+    ?assertEqual([44], hb_ao:get(<<"already-seen">>, Settled, Opts)),
+    ?assertEqual(not_found, hb_ao:get(<<"dedup">>, Settled, not_found, Opts)),
+    ?assertEqual(
+        not_found,
+        hb_ao:get(<<"results/outbox">>, Settled, not_found, Opts)
+    ),
+    ?assertEqual(100, balance(Settled, Alice, Opts)).
+
+swap_targeted_token_action_runs_after_settlement_test() ->
+    Opts = opts(),
+    AliceWallet = ar_wallet:new(),
+    Alice = hb_util:human_id(ar_wallet:to_address(AliceWallet)),
+    Bob = id(<<"Bob">>),
+    RawBase =
+        raw_token_state(
+            #{
+                <<"total-supply">> => 100,
+                <<"balances">> => #{ Alice => 100 },
+                <<"swap-device">> => <<"test-device@1.0">>,
+                <<"already-seen">> => [],
+                <<"scheduler-device">> => <<"arweave-scheduler@1.0">>,
+                <<"scheduler-mode">> => <<"all">>,
+                <<"security-device">> => <<"security@1.0">>
+            },
+            Opts
+        ),
+    {ok, Initialized} = dev_token:init(RawBase, #{}, Opts),
+    {ok, Process} = hb_message:with_only_committed(Initialized, Opts),
+    Base =
+        hb_ao:set(
+            hb_message:uncommitted(Initialized, Opts),
+            #{ <<"process">> => Process },
+            Opts#{ <<"hashpath">> => ignore }
+        ),
+    ProcessID = hb_message:id(Process, signed, Opts),
+    Body =
+        targeted_tx(
+            AliceWallet,
+            ProcessID,
+            [
+                {<<"action">>, <<"Transfer">>},
+                {<<"recipient">>, Bob},
+                {<<"quantity">>, <<"10">>}
+            ]
+        ),
+    Assignment =
+        hb_message:commit(
+            #{
+                <<"path">> => <<"compute">>,
+                <<"type">> => <<"Assignment">>,
+                <<"slot">> => 46,
+                <<"process">> => ProcessID,
+                <<"body">> => Body
+            },
+            Opts
+        ),
+    {ok, Updated} = dev_token:compute(Base, Assignment, Opts),
+    ?assertEqual(<<"random-value">>, hb_ao:get(<<"random-key">>, Updated, Opts)),
+    ?assertEqual(46, hb_ao:get(<<"results/assignment-slot">>, Updated, Opts)),
+    ?assertEqual([46], hb_ao:get(<<"already-seen">>, Updated, Opts)),
+    ?assertNotEqual(not_found, hb_ao:get(<<"dedup">>, Updated, not_found, Opts)),
+    ?assertEqual({ok, 90}, public_balance(Updated, Alice, Opts)),
+    ?assertEqual({ok, 10}, public_balance(Updated, Bob, Opts)).
+
+swap_non_target_assignment_is_still_settled_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 100 },
+                extra =>
+                    #{
+                        <<"swap-device">> => <<"test-device@1.0">>,
+                        <<"already-seen">> => []
+                    }
+            },
+            Opts
+        ),
+    ProcessID = process_id(Base, Opts),
+    Body =
+        targeted_tx(
+            ar_wallet:new(),
+            id(<<"other-process">>),
+            [
+                {<<"action">>, <<"Transfer">>},
+                {<<"recipient">>, id(<<"bob">>)},
+                {<<"quantity">>, <<"10">>}
+            ]
+        ),
+    Assignment =
+        #{
+            <<"path">> => <<"compute">>,
+            <<"type">> => <<"Assignment">>,
+            <<"slot">> => 45,
+            <<"process">> => ProcessID,
+            <<"body">> => Body
+        },
+    {ok, Settled} = dev_token:compute(Base, Assignment, Opts),
+    ?assertEqual(<<"random-value">>, hb_ao:get(<<"random-key">>, Settled, Opts)),
+    ?assertEqual(45, hb_ao:get(<<"results/assignment-slot">>, Settled, Opts)),
+    ?assertEqual(not_found, hb_ao:get(<<"dedup">>, Settled, not_found, Opts)),
+    ?assertEqual(100, balance(Settled, Alice, Opts)).
+
 duplicate_quantity_tags_are_not_first_match_transfer_test() ->
     Opts = opts(),
     Alice = id(<<"alice">>),
@@ -498,6 +649,65 @@ init_canonicalizes_raw_initial_balances_test() ->
     ?assertEqual({error, not_found}, hb_ao:resolve(Balances, Alice, Opts)),
     ?assertEqual({ok, 10}, hb_ao:resolve(Balances, id_key(Alice), Opts)),
     ?assertEqual({ok, 10}, public_balance(Initialized, Alice, Opts)).
+
+swap_init_preserves_case_sensitive_balances_and_validation_test() ->
+    Opts = opts(),
+    Alice = id(<<"Alice">>),
+    Base =
+        raw_token_state(
+            #{
+                <<"total-supply">> => 7,
+                <<"balances">> => #{ Alice => 7 },
+                <<"swap-device">> => <<"test-device@1.0">>
+            },
+            Opts
+        ),
+    {ok, Initialized} = dev_token:init(Base, #{}, Opts),
+    Balances = hb_ao:get(<<"balances">>, Initialized, Opts),
+    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, Alice, Opts)),
+    ?assertEqual({error, not_found}, hb_ao:resolve(Balances, id_key(Alice), Opts)),
+    ?assertEqual({ok, 7}, public_balance(Initialized, Alice, Opts)),
+    Invalid =
+        raw_token_state(
+            #{
+                <<"total-supply">> => 7,
+                <<"balances">> => #{ Alice => -1 },
+                <<"swap-device">> => <<"test-device@1.0">>
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Balance amounts must be non-negative integers.">>},
+        dev_token:init(Invalid, #{}, Opts)
+    ).
+
+swap_init_seeds_initial_holder_without_default_supply_test() ->
+    Opts = opts(),
+    Alice = id(<<"Alice">>),
+    Base =
+        raw_token_state(
+            #{
+                <<"initial-holder">> => Alice,
+                <<"total-supply">> => 7,
+                <<"swap-device">> => <<"test-device@1.0">>
+            },
+            Opts
+        ),
+    {ok, Initialized} = dev_token:init(Base, #{}, Opts),
+    Balances = hb_ao:get(<<"balances">>, Initialized, Opts),
+    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, Alice, Opts)),
+    MissingSupply =
+        raw_token_state(
+            #{
+                <<"initial-holder">> => Alice,
+                <<"swap-device">> => <<"test-device@1.0">>
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Total supply must be a non-negative integer.">>},
+        dev_token:init(MissingSupply, #{}, Opts)
+    ).
 
 init_rejects_invalid_initial_balances_test() ->
     Opts = opts(),
