@@ -1,16 +1,22 @@
 %%% @doc A fast, simple implementation of AO token specification.
 %%% Specification: https://cookbook_ao.arweave.net/references/api/token.html
 -module(dev_token).
--export([info/0, compute/3, init/3, normalize/3, snapshot/3, balance/3, mint/3]).
-%%% Non-public device API functions. Note: Ensure that these are not exported
-%%% as publicly callable device keys, either by having arity > 3, or by gating
-%%% the public surface in `info/0`.
+-export([
+    info/0,
+    route/4,
+    compute/3,
+    init/3,
+    normalize/3,
+    snapshot/3,
+    balance/3,
+    mint/3
+]).
+%%% Non-public device API functions. Note: Ensure that these are not exported.
 -export([handle_action/4]).
-%%% Public helpers.
--export([validate_address/2]).
 -include_lib("hb/include/hb.hrl").
 
 -implements(<<"token@1.0">>).
+-device_libraries([lib_token]).
 
 -define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
 
@@ -48,29 +54,6 @@
         <<"hashpath">>
     ]
 ).
-%% @doc `validate_address/2` built-in reserved keys list
--define(AO_RESERVED_ADDRESS_KEYS,
-    [
-        <<"path">>,
-        <<"get">>,
-        <<"set">>,
-        <<"remove">>,
-        <<"verify">>,
-        <<"keys">>,
-        <<"id">>,
-        <<"commit">>,
-        <<"committed">>,
-        <<"committers">>,
-        <<"index">>,
-        <<"info">>,
-        <<"set_path">>,
-        <<"reserved_keys">>,
-        <<"is_reserved_key">>,
-        <<"dedup">>,
-        <<"dedup-subject">>
-    ]
-).
-
 %% @doc Return the configured `set` field whitelist. Defaults to open policy
 %% via wildcard unless `whitelisted-fields` is explicitly restricted.
 whitelisted_auth_fields(Base, Opts) ->
@@ -95,21 +78,62 @@ end.
 
 %%% `~process@1.0' interface implementation.
 
-%% @doc Return the public token device API.
+%% @doc Return the public token device API. All resolutions pass through
+%% `route/4' so scheduled assignments cannot use the message-device fallback
+%% to execute a state path directly.
 info() ->
-    #{
-        exports =>
-            [
-                <<"compute">>,
-                <<"init">>,
-                <<"normalize">>,
-                <<"snapshot">>,
-                <<"balance">>,
-                <<"mint">>
-            ]
-    }.
+    #{ handler => fun route/4 }.
 
-%% @doc Canonicalize account keys in the initial balance trie.
+%% @doc Route token calls. Scheduler assignments are state transitions and
+%% must enter through exactly `/compute'; lifecycle calls and ordinary reads
+%% retain the existing public device behavior.
+route(Key, Base, Req, Opts) ->
+    case is_assignment(Req, Opts) andalso not is_compute_path(Req, Opts) of
+        true ->
+            ?event(
+                token_short,
+                {ignoring_non_compute_assignment,
+                    {path, hb_path:from_message(request, Req, Opts)}},
+                Opts
+            ),
+            {ok, Base};
+        false ->
+            NormKey = hb_util:to_lower(hb_ao:normalize_key(Key)),
+            route_allowed(NormKey, Key, Base, Req, Opts)
+    end.
+
+route_allowed(<<"compute">>, _Key, Base, Req, Opts) -> compute(Base, Req, Opts);
+route_allowed(<<"init">>, _Key, Base, Req, Opts) -> init(Base, Req, Opts);
+route_allowed(<<"normalize">>, _Key, Base, Req, Opts) -> normalize(Base, Req, Opts);
+route_allowed(<<"snapshot">>, _Key, Base, Req, Opts) -> snapshot(Base, Req, Opts);
+route_allowed(<<"balance">>, _Key, Base, Req, Opts) -> balance(Base, Req, Opts);
+route_allowed(<<"mint">>, _Key, Base, Req, Opts) -> mint(Base, Req, Opts);
+route_allowed(_NormKey, Key, Base, Req, Opts) ->
+    hb_ao:raw(<<"message@1.0">>, Key, Base, Req, Opts).
+
+is_assignment(Req, Opts) ->
+    case hb_maps:get(<<"type">>, Req, undefined, Opts) of
+        undefined ->
+            is_assignment_envelope(Req);
+        Type ->
+            hb_path:matches(Type, <<"assignment">>) orelse
+                is_assignment_envelope(Req)
+    end.
+
+is_assignment_envelope(Req) when is_map(Req) ->
+    maps:is_key(<<"slot">>, Req) andalso
+        maps:is_key(<<"process">>, Req) andalso
+        maps:is_key(<<"body">>, Req);
+is_assignment_envelope(_Req) ->
+    false.
+
+is_compute_path(Req, Opts) ->
+    case hb_path:from_message(request, Req, Opts) of
+        [Path] -> hb_path:matches(Path, <<"compute">>);
+        _ -> false
+    end.
+
+%% @doc Validate initial supply and canonicalize balance-holder ID keys.
 init(Base, _Req, Opts) ->
     canonicalize_balances(Base, Opts).
 
@@ -122,44 +146,76 @@ snapshot(Base, _Req, _Opts) ->
     {ok, Base}.
 
 canonicalize_balances(Base, Opts) ->
+    maybe
+        Balances0 = initial_balances(Base, Opts),
+        true ?= (Balances0 =/= not_found) orelse
+            {error, <<"Balances not found.">>},
+        Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
+        true ?= is_map(Balances) orelse
+            {error, <<"Balances must be a map.">>},
+        canonicalize_balances(Base, Balances, Opts)
+    end.
+
+initial_balances(Base, Opts) ->
     case hb_maps:get(<<"balances">>, Base, not_found, Opts) of
         not_found ->
-            {ok, Base};
-        Balances0 ->
-            Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
-            case is_map(Balances) of
-                true -> canonicalize_balances(Base, Balances, Opts);
-                false -> {ok, Base}
-            end
+            case hb_maps:get(<<"initial-holder">>, Base, not_found, Opts) of
+                not_found -> not_found;
+                Holder ->
+                    #{Holder => hb_maps:get(<<"total-supply">>, Base, not_found, Opts)}
+            end;
+        Balances ->
+            Balances
     end.
 
 canonicalize_balances(Base, Balances, Opts) ->
-    {Changed, FlatBalances} =
-        lists:foldl(
-            fun(Key, {ChangedAcc, BalancesAcc}) ->
-                Account = account_key(Key),
-                {ok, Amount} = hb_ao:resolve(Balances, Key, Opts),
-                {
-                    ChangedAcc
-                        orelse (Account =/= Key)
-                        orelse maps:is_key(Account, BalancesAcc),
-                    add_balance(Account, Amount, BalancesAcc)
-                }
-            end,
-            {false, #{}},
-            trie_keys(Balances, Opts)
-        ),
-    case Changed of
-        false ->
-            {ok, Base};
-        true ->
-            {ok, NewBalances} =
-                hb_ao:resolve(
-                    #{<<"device">> => <<"trie@1.0">>},
-                    FlatBalances#{<<"path">> => <<"set">>},
-                    Opts
-                ),
-            {ok, hb_maps:put(<<"balances">>, NewBalances, Base, Opts)}
+    maybe
+        {ok, TotalSupply} ?=
+            nonneg_int(
+                hb_ao:get(<<"total-supply">>, Base, not_found, Opts),
+                <<"Total supply must be a non-negative integer.">>
+            ),
+        {ok, Changed, FlatBalances} ?=
+            lists:foldl(
+                fun
+                    (_Key, {error, _} = Error) ->
+                        Error;
+                    (Key, {ok, ChangedAcc, BalancesAcc}) ->
+                        maybe
+                            true ?= lib_token:validate_address(Key, [], Opts),
+                            {ok, Amount0} ?= hb_ao:resolve(Balances, Key, Opts),
+                            {ok, Amount} ?=
+                                nonneg_int(
+                                    Amount0,
+                                    <<"Balance amounts must be non-negative integers.">>
+                                ),
+                            ID = id_key(Key),
+                            {
+                                ok,
+                                ChangedAcc
+                                    orelse (ID =/= Key)
+                                    orelse maps:is_key(ID, BalancesAcc),
+                                add_balance(ID, Amount, BalancesAcc)
+                            }
+                        end
+                end,
+                {ok, false, #{}},
+                trie_keys(Balances, Opts)
+            ),
+        true ?= (lists:sum(maps:values(FlatBalances)) =:= TotalSupply) orelse
+            {error, <<"Total supply does not match balances.">>},
+        case Changed of
+            false ->
+                {ok, Base};
+            true ->
+                {ok, NewBalances} =
+                    hb_ao:resolve(
+                        #{<<"device">> => <<"trie@1.0">>},
+                        FlatBalances#{<<"path">> => <<"set">>},
+                        Opts
+                    ),
+                {ok, hb_maps:put(<<"balances">>, NewBalances, Base, Opts)}
+        end
     end.
 
 %% @doc Entrypoint for computations on token processes. Deduplicates by signed
@@ -169,26 +225,49 @@ canonicalize_balances(Base, Balances, Opts) ->
 %% interactions do not result in invalid `~process@1.0' states.
 compute(Base, Assignment, Opts) ->
     ?event({token_call, Assignment}),
-    case deduplicate(Base, Assignment, Opts) of
-        {skip, DedupedBase} ->
-            ?event(token_short, {skipping_duplicate_assignment, Assignment}, Opts),
-            {ok, DedupedBase};
-        {ok, DedupedBase} ->
-            maybe
-                {ok, SecureReq} ?= enforce_security(DedupedBase, Assignment, Opts),
-                {ok, Action} ?= hb_ao:resolve(Assignment, <<"body/action">>, Opts),
-                {ok, Res} ?= handle_action(Action, DedupedBase, SecureReq, Opts),
-                ?event(debug_token, {route_result, Res}, Opts),
-                {ok, Res}
-            else
+    case assignment_targets_process(Base, Assignment, Opts) of
+        true ->
+            case deduplicate(Base, Assignment, Opts) of
+                {skip, DedupedBase} ->
+                    ?event(token_short, {skipping_duplicate_assignment, Assignment}, Opts),
+                    {ok, DedupedBase};
+                {ok, DedupedBase} ->
+                    maybe
+                        {ok, SecureReq} ?= enforce_security(DedupedBase, Assignment, Opts),
+                        {ok, Action} ?= hb_ao:resolve(Assignment, <<"body/action">>, Opts),
+                        {ok, Res} ?= handle_action(Action, DedupedBase, SecureReq, Opts),
+                        ?event(debug_token, {route_result, Res}, Opts),
+                        {ok, Res}
+                    else
+                        {error, Reason} ->
+                            ?event(token_short, {error_during_token_call, Reason}, Opts),
+                            send_error(Base, Assignment, Reason, Opts)
+                    end;
                 {error, Reason} ->
-                    ?event(token_short, {error_during_token_call, Reason}, Opts),
+                    ?event(token_short, {error_during_token_dedup, Reason}, Opts),
                     send_error(Base, Assignment, Reason, Opts)
             end;
-        {error, Reason} ->
-            ?event(token_short, {error_during_token_dedup, Reason}, Opts),
-            send_error(Base, Assignment, Reason, Opts)
+        false ->
+            ?event(token_short, {skipping_non_target_assignment, Assignment}, Opts),
+            {ok, Base}
     end.
+
+assignment_targets_process(Base, Assignment, Opts) ->
+    case all_mode_arweave_scheduler(Base, Opts) of
+        true ->
+            Body = hb_maps:get(<<"body">>, Assignment, #{}, Opts),
+            tx_field(Body, <<"target">>, <<>>, Opts) =:= current_process_id(Base, Opts);
+        _ ->
+            true
+    end.
+
+all_mode_arweave_scheduler(Base, Opts) ->
+    hb_maps:get(<<"scheduler-device">>, Base, not_found, Opts) =:= <<"arweave-scheduler@1.0">>
+        andalso hb_maps:get(<<"scheduler-mode">>, Base, not_found, Opts) =:= <<"all">>.
+
+current_process_id(Base, Opts) ->
+    Msg = hb_ao:get(<<"process">>, ensure_process_key(Base, Opts), Opts),
+    hb_message:id(Msg, signed, Opts).
 
 %% @doc Deduplicate token computations by the signed assignment body. Replayed
 %% assignments get fresh slots, so the assignment itself cannot be the subject.
@@ -221,28 +300,35 @@ enforce_security(Base, Req, Opts) ->
 
 %% @doc Route the request to the appropriate key resolution function, depending
 %% upon the `action' specified.
-handle_action(Action, Base, Req, Opts) ->
+handle_action(Action, Base, Req, Opts) when is_binary(Action) ->
     ?event(token_short, {token_action, Action}, Opts),
-    case hb_util:to_lower(hb_ao:normalize_key(Action)) of
-        <<"transfer">> -> transfer(Base, Req, Opts);
-        <<"set">> -> secure_set(Base, Req, Opts);
-        <<"subscribe">> -> outbox_subscribe(Base, Req, Opts);
-        <<"unsubscribe">> -> outbox_unsubscribe(Base, Req, Opts);
-        MintDevAction -> action_as_mint_device(MintDevAction, Base, Req, Opts)
-    end.
+    try
+        case hb_util:to_lower(Action) of
+            <<"transfer">> -> transfer(Base, Req, Opts);
+            <<"set">> -> secure_set(Base, Req, Opts);
+            <<"subscribe">> -> outbox_subscribe(Base, Req, Opts);
+            <<"unsubscribe">> -> outbox_unsubscribe(Base, Req, Opts);
+            MintDevAction -> action_as_mint_device(MintDevAction, Base, Req, Opts)
+        end
+    catch
+        error:Reason -> {error, Reason}
+    end;
 
-%% @doc Get the balance for an account. Normalize the minting state for that
-%% account before returning.
+handle_action(_Action, _Base, _Req, _Opts) ->
+    {error, <<"Invalid Action format">>}.
+
+%% @doc Get the balance for an ID. Normalize the minting state for that ID
+%% before returning.
 balance(Base, Req, Opts) ->
     maybe
-        {ok, Account0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
-        true ?= validate_address(Account0, [], Opts),
-        Account = account_key(Account0),
+        {ok, ID0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
+        true ?= lib_token:validate_address(ID0, [], Opts),
+        ID = id_key(ID0),
         ?event(
             debug_token,
             {balance_request,
-                {account, Account0},
-                {canonical_account, Account},
+                {id, ID0},
+                {canonical_id, ID},
                 {base, Base}
             },
             Opts
@@ -250,7 +336,7 @@ balance(Base, Req, Opts) ->
         {ok, NormBase} ?=
             normalize_mint(
                 Base,
-                hb_ao:set(Req, <<"subject">>, Account, Opts),
+                hb_ao:set(Req, <<"subject">>, ID, Opts),
                 Opts
             ),
         BalanceRes =
@@ -258,14 +344,14 @@ balance(Base, Req, Opts) ->
                 [
                     NormBase,
                     <<"balances">>,
-                    Account
+                    ID
                 ],
                 Opts
             ),
         ?event(
             debug_token,
             {balance_after_mint_normalization,
-                {account, Account},
+                {id, ID},
                 {balance, BalanceRes}
             },
             Opts
@@ -283,19 +369,30 @@ transfer(Base, Assignment, Opts) ->
         {ok, Req} ?= hb_ao:resolve(Assignment, <<"body">>, Opts),
         {ok, From0} ?= hb_ao:resolve(Req, <<"from">>, Opts),
         {ok, Recipient0} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
-        {ok, Quantity} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
+        {ok, Quantity0} ?= action_field(Req, <<"quantity">>, Opts),
+        {ok, Quantity} ?=
+            nonneg_int(
+                Quantity0,
+                <<"Quantity must be a non-negative integer.">>
+            ),
+        true ?= transfer_enabled(Base, Opts),
         % validate From/Recipient sanity
-        true ?= validate_address(From0, [], Opts),
-        true ?= validate_address(Recipient0, [], Opts),
-        From = account_key(From0),
-        Recipient = account_key(Recipient0),
+        true ?= lib_token:validate_address(From0, [], Opts),
+        true ?= lib_token:validate_address(Recipient0, [], Opts),
+        From = id_key(From0),
+        Recipient = id_key(Recipient0),
         % Normalize the base's minting state for the sender.
         {ok, NormBase} ?=
-            normalize_mint(
-                Base,
-                Assignment#{ <<"subject">> => From },
-                Opts
-            ),
+            case Quantity of
+                0 -> {ok, Base};
+                _ -> normalize_mint(
+                    Base,
+                    Assignment#{
+                        <<"body">> => hb_ao:set(Req, <<"subject">>, From, Opts)
+                    },
+                    Opts
+                )
+            end,
         % Retrieve balances from the base state.
         Balances = hb_ao:get(<<"balances">>, NormBase, Opts),
         ?event(debug_token, {balances_before_transfer, Balances}, Opts),
@@ -316,13 +413,11 @@ transfer(Base, Assignment, Opts) ->
         true ?= (is_integer(SenderBalance) and is_integer(RecipientBalance)
                 and (SenderBalance >= 0) and (RecipientBalance >= 0))
             orelse {error, <<"Invalid balance values.">>},
-        true ?= (is_integer(Quantity) and (Quantity >= 0))
-            orelse {error, <<"Quantity must be a non-negative integer.">>},
         true ?= (SenderBalance >= Quantity) 
             orelse {error, <<"Insufficient balance.">>},
-        % Handle self-transfer: skip balance updates
+        % Handle zero and self transfers without balance-trie writes.
         NewBaseAfterTransfer =
-            case From =:= Recipient of
+            case (Quantity =:= 0) orelse (From =:= Recipient) of
                 true -> NormBase;
                 false ->
                     {ok, NewBalances} =
@@ -357,6 +452,14 @@ transfer(Base, Assignment, Opts) ->
             send_error(Base, Assignment, Reason, Opts)
     end.
 
+transfer_enabled(Base, Opts) ->
+    Default = hb_opts:get(<<"transfer-enabled">>, true, Opts),
+    case hb_ao:get(<<"transfer-enabled">>, Base, Default, Opts) of
+        true -> true;
+        false -> {error, <<"Transfers are disabled.">>};
+        _ -> {error, <<"Invalid `transfer-enabled` type.">>}
+    end.
+
 transfer_notices(From, Recipient, Quantity, Req, Opts) ->
     % Extract forwarded keys (X- prefixed fields from request)
     ForwardedKeys = forwarded_keys(Req, Opts),
@@ -384,6 +487,12 @@ transfer_notices(From, Recipient, Quantity, Req, Opts) ->
 %% `body.subject`, hoist it to the top-level request shape expected by the mint
 %% device before dispatch.
 mint(Base, Assignment, Opts) ->
+    case mint_enabled(Base, Opts) of
+        true -> mint_request(Base, Assignment, Opts);
+        Error -> Error
+    end.
+
+mint_request(Base, Assignment, Opts) ->
     case hb_ao:resolve(Assignment, <<"body">>, Opts) of
         {error, _} ->
             as_mint_device(<<"mint">>, Base, Assignment, Opts);
@@ -393,17 +502,25 @@ mint(Base, Assignment, Opts) ->
                     as_mint_device(<<"mint">>, Base, Assignment, Opts);
                 {ok, Subject} ->
                     maybe
-                        true ?= validate_address(Subject, [], Opts),
+                        true ?= lib_token:validate_address(Subject, [], Opts),
                         MintReq1 =
                             hb_ao:set(
                                 Assignment,
                                 <<"subject">>,
-                                account_key(Subject),
+                                id_key(Subject),
                                 Opts
                             ),
                         as_mint_device(<<"mint">>, Base, MintReq1, Opts)
                     end
             end
+    end.
+
+mint_enabled(Base, Opts) ->
+    Default = hb_opts:get(<<"mint-enabled">>, true, Opts),
+    case hb_ao:get(<<"mint-enabled">>, Base, Default, Opts) of
+        true -> true;
+        false -> {error, <<"Minting is disabled.">>};
+        _ -> {error, <<"Invalid `mint-enabled` type.">>}
     end.
 
 %% @doc Execute the mint device's main key, but return the state in its 
@@ -525,62 +642,15 @@ enforce_set_authority(Base, Req, Opts) ->
 
 %%% Helper functions.
 
-%% @doc Validate address format for security. the validation
-%% allows binary addresses up to 128 bytes and prevent invalid
-%% addresses such as trie reserved keys.
-validate_address(Address, CustomList) ->
-    validate_address(Address, CustomList, #{}).
-
-validate_address(Address, CustomList, Opts) when is_binary(Address), is_list(CustomList) ->
-    ReservedKeys = ?AO_RESERVED_ADDRESS_KEYS ++ CustomList,
-    AccountKey = account_key(Address),
-    CanonicalReservedKeys = [account_key(Key) || Key <- ReservedKeys, is_binary(Key)],
-    case byte_size(Address) of
-        0 -> {error, <<"Address cannot be empty.">>};
-        N when N > 128 -> {error, <<"Address is too long.">>};
-        _ ->
-            TrieReservedKeys = trie_reserved_keys(Opts),
-            maybe
-                true ?= (not is_reserved_trie_key(Address, TrieReservedKeys))
-                    orelse {error, <<"Address uses a reserved trie internal key.">>},
-                true ?= (not is_reserved_trie_key(AccountKey, TrieReservedKeys))
-                    orelse {error, <<"Address uses a reserved trie internal key.">>},
-                true ?= (not is_reserved_custom_key(Address, ReservedKeys))
-                    orelse {error, <<"Address is a reserved ao/custom key">>},
-                true ?= (not is_reserved_custom_key(AccountKey, CanonicalReservedKeys))
-                    orelse {error, <<"Address is a reserved ao/custom key">>},
-                % Check for path separators (security: prevent path traversal) and whitespaces.
-                case binary:match(Address, [<<"/">>, <<"\\">>, <<" ">>, <<"\n">>, <<"\r">>, <<"\t">>]) of
-                    nomatch -> true;
-                    _ -> {error, <<"Address cannot contain path separators or whitespaces">>}
-                end
-            end
-    end;
-validate_address(_, _, _) ->
-    {error, <<"Address must be a binary.">>}.
-
-account_key(Address) when is_binary(Address) ->
-    hb_util:to_lower(Address).
-
 trie_keys(Balances, Opts) ->
     {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
     Trie:keys(Balances, Opts).
 
-is_reserved_trie_key(Key, ReservedKeys) ->
-    lists:member(Key, ReservedKeys).
+id_key(ID) when is_binary(ID) ->
+    hb_util:to_lower(hb_ao:normalize_key(ID)).
 
-trie_reserved_keys(Opts) ->
-    {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
-    maps:get(reserved, Trie:info(), []).
-
-add_balance(Account, Amount, Balances) ->
-    Balances#{ Account => maps:get(Account, Balances, 0) + Amount }.
-
-%% @doc Check if the given Key exists in the passed List
-is_reserved_custom_key(Key, List) when is_binary(Key), is_list(List) ->
-    lists:member(Key, List);
-is_reserved_custom_key(_, _) -> 
-    false.
+add_balance(ID, Amount, Balances) ->
+    Balances#{ ID => maps:get(ID, Balances, 0) + Amount }.
 
 outbox_send(Messages, Base, Opts) ->
     maybe
@@ -594,6 +664,8 @@ outbox_send(Messages, Base, Opts) ->
 
 outbox_subscribe(Base, Req, Opts) ->
     maybe
+        true ?= subscription_allowed(Req, Base, Opts) orelse
+            {error, <<"Subscription is not allowed.">>},
         {ok, Outbox} ?= process_outbox(Opts),
         Outbox:subscribe(Base, Req, Opts)
     end.
@@ -602,6 +674,32 @@ outbox_unsubscribe(Base, Req, Opts) ->
     maybe
         {ok, Outbox} ?= process_outbox(Opts),
         Outbox:unsubscribe(Base, Req, Opts)
+    end.
+
+subscription_allowed(Req, Base, Opts) ->
+    try
+        Body = hb_maps:get(<<"body">>, Req, not_found, Opts),
+        Action = hb_maps:get(<<"subscribe-action">>, Body, not_found, Opts),
+        Target = hb_maps:get(<<"subscribe-target">>, Body, <<"broadcast">>, Opts),
+        Listener = hb_maps:get(<<"from">>, Body, not_found, Opts),
+        Policy = hb_util:message_to_ordered_list(
+            hb_maps:get(<<"allowed-subscriptions">>, Base, [], Opts),
+            Opts
+        ),
+        is_binary(Action) andalso is_binary(Target) andalso is_binary(Listener)
+            andalso lists:any(
+                fun(Entry) ->
+                    {Action, Target, Listener} =:=
+                        {
+                            hb_maps:get(<<"action">>, Entry, not_found, Opts),
+                            hb_maps:get(<<"target">>, Entry, not_found, Opts),
+                            hb_maps:get(<<"listener">>, Entry, not_found, Opts)
+                        }
+                end,
+                Policy
+            )
+    catch
+        _:_ -> false
     end.
 
 process_outbox(Opts) ->
@@ -713,4 +811,58 @@ send_error(Base, Assignment, Reason, Opts) when is_binary(Reason) ->
                 Base,
                 Opts
             )
+    end.
+
+action_field(Msg, Key, Opts) ->
+    case tag_field(Msg, Key, Opts) of
+        not_found -> hb_ao:resolve(Msg, Key, Opts);
+        Value -> {ok, Value}
+    end.
+
+tag_field(Msg, Key, Opts) ->
+    case hb_message:commitment(#{ <<"commitment-device">> => <<"tx@1.0">> }, Msg, Opts) of
+        {ok, _ID, Commitment} ->
+            case hb_maps:get(<<"original-tags">>, Commitment, not_found, Opts) of
+                Tags when is_map(Tags) -> tag_value(Tags, Key, Opts);
+                _ -> not_found
+            end;
+        _ ->
+            not_found
+    end.
+
+tag_value(Tags, Key, Opts) ->
+    Matches =
+        hb_maps:fold(
+            fun(_Index, #{ <<"name">> := Name, <<"value">> := Value }, Acc) ->
+                case hb_util:to_lower(Name) =:= Key of
+                    true -> [Value | Acc];
+                    false -> Acc
+                end;
+            (_Index, _Tag, Acc) ->
+                Acc
+            end,
+            [],
+            Tags,
+            Opts
+        ),
+    case Matches of
+        [Value] -> Value;
+        _ -> not_found
+    end.
+
+%% @doc Read a value from the real L1 transaction fields recorded in the
+%% `tx@1.0' commitment. Top-level keys may come from tags with the same names,
+%% so all-mode process routing must not use them.
+tx_field(Body, Field, Default, Opts) ->
+    case hb_message:commitment(#{ <<"commitment-device">> => <<"tx@1.0">> }, Body, Opts) of
+        {ok, _ID, Commitment} ->
+            hb_maps:get(<<"field-", Field/binary>>, Commitment, Default, Opts);
+        _ ->
+            Default
+    end.
+
+nonneg_int(Value, Error) ->
+    case hb_util:safe_int(Value) of
+        {ok, Int} when Int >= 0 -> {ok, Int};
+        _ -> {error, Error}
     end.

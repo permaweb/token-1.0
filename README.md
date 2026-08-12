@@ -4,8 +4,8 @@
 
 ```sh
 rebar3 compile
-rebar3 device verify
-rebar3 device package
+rebar3 device verify --device-src=src,_build/default/lib/hb/src/preloaded/token
+rebar3 device package --device-src=src,_build/default/lib/hb/src/preloaded/token
 ```
 
 ## test
@@ -14,16 +14,22 @@ rebar3 device package
 HB_PORT=0 rebar3 device test
 rebar3 eunit-all
 ```
+
+## genesis
+
+Initialization requires valid addresses with non-negative integer balances and a
+non-negative `total-supply` equal to their sum. Invalid genesis state fails closed.
+
 ## published package
 
 ```bash
-device publish: token@1.0 
+Published device: token@1.0; 
 
-spec=ibZf_Tqk4omTejmBIgCI6HCvp5HWYlgKhjkDMZPh4UY 
+Specification ID: pXHakE4TUBUBg4JFnsCmcvXSis7WMXsUtAP5AzOqmjc;
 
-impl=y8vkutjPnDdfOLP2ISSnj1eOBw9x0jTddgY4dhVpWrQ 
+Implementation ID: PcMKkrsgVld-4JR63GnRaumlqm1icACGDPUGm86wB1I;
 
-signer=vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0
+Signer: vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0;
 ```
 ## local node
 
@@ -31,19 +37,21 @@ signer=vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0
 HB_CONFIG=config.json rebar3 device local
 ```
 
-`config.json` pins the published `process-outbox@1.0` and `security@1.0` implementations through
-HyperBEAM's `trusted-devices` runtime map.
+`config.json` pins the published `mint-authority@1.0`, `process-outbox@1.0`,
+and `security@1.0` implementations through HyperBEAM's `trusted-devices` runtime map.
 
 src:
 
 * https://github.com/permaweb/process-outbox-1.0
 * https://github.com/permaweb/security-1.0
+* https://github.com/permaweb/mint-authority
 
 ```json
 {
   "trusted-devices": {
+    "mint-authority@1.0": "uzHd158Q7i40TDjwsbGAB88E_idazRRIBctTq_rLzGo",
     "process-outbox@1.0": "HOcPV7wxMHYb3rSQ3EfykQhHx_b8waRWhXolhcBNgHo",
-    "security@1.0": "ARgymad5oYZcWPpxuV-A9hoSgmm4ElgPIvxMwmeh674"
+    "security@1.0": "RrkCKxGm72vA9tuDAxKSgDzfvdDhwk1dM0g2ZWmtRKI"
   }
 }
 ```
@@ -74,7 +82,7 @@ calls the token device against the raw published item and bypasses
 ## publish
 
 ```sh
-rebar3 device publish --key wallet.json
+rebar3 device publish --device-src=src,_build/default/lib/hb/src/preloaded/token --key wallet.json
 ```
 
 ## License

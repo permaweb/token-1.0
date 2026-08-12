@@ -2,7 +2,7 @@ _build/
 _checkouts/
 ebin/
 cache-*/
-scripts/
+scripts/*
 debug/
 logs
 .eunit/

@@ -10,24 +10,53 @@
 -define(MAX_TRANSFER_AMOUNT, 1_000_000_000_000_000_000 div 5).
 -define(NODE_WALLET_CACHE_KEY, {?MODULE, node_wallet}).
 -define(IDENTITIES_CACHE_KEY, {?MODULE, identities}).
--define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>).
--define(PROCESS_OUTBOX_IMPL, <<"HOcPV7wxMHYb3rSQ3EfykQhHx_b8waRWhXolhcBNgHo">>).
--define(SECURITY_DEVICE, <<"security@1.0">>).
--define(SECURITY_IMPL, <<"ARgymad5oYZcWPpxuV-A9hoSgmm4ElgPIvxMwmeh674">>).
 
 opts() ->
+    ensure_lib_token(),
     hb:init(),
     #{
         <<"load-remote-devices">> => false,
-        <<"trusted-devices">> => #{
-            ?PROCESS_OUTBOX_DEVICE => ?PROCESS_OUTBOX_IMPL,
-            ?SECURITY_DEVICE => ?SECURITY_IMPL
-        },
-        <<"store">> => [hb_test_utils:test_store() | default_stores()]
+        <<"store">> => [hb_test_utils:test_store()]
     }.
 
-default_stores() ->
-    hb_opts:get(store, [], hb_opts:default_message()).
+ensure_lib_token() ->
+    case code:ensure_loaded(lib_token) of
+        {module, lib_token} ->
+            ok;
+        {error, _} ->
+            Source = lib_token_source(),
+            case compile:file(
+                Source,
+                [
+                    debug_info,
+                    binary,
+                    {i, "src"},
+                    {i, "_build/default/lib/hb/src"},
+                    {i, "_build/default/lib/hb/include"}
+                ]
+            ) of
+                {ok, lib_token, Beam} ->
+                    case code:load_binary(lib_token, Source, Beam) of
+                        {module, lib_token} -> ok;
+                        {error, already_loaded} -> ok;
+                        Other -> erlang:error({lib_token_load_failed, Other})
+                    end;
+                Other ->
+                    erlang:error({lib_token_compile_failed, Other})
+            end
+    end.
+
+lib_token_source() ->
+    Candidates =
+        [filename:join(["_build/default/lib/hb", "src", "preloaded", "token", "lib_token.erl"])] ++
+            case code:lib_dir(hb) of
+                {error, _} -> [];
+                HBDir -> [filename:join([HBDir, "src", "preloaded", "token", "lib_token.erl"])]
+            end,
+    case lists:dropwhile(fun(Path) -> not filelib:is_regular(Path) end, Candidates) of
+        [Path | _] -> Path;
+        [] -> filename:join(["_build/default/lib/hb", "src", "preloaded", "token", "lib_token.erl"])
+    end.
 
 simulate_native_token_test_() ->
     {timeout, 120, fun simulate_native_token/0}.
@@ -170,12 +199,23 @@ generate_identities(Users) ->
 generate_ledger(Opts) ->
     Extras = hb_opts:get(<<"spawn-extras">>, #{}, Opts),
     BalanceKey = balance_key(Extras, Opts),
+    InitialBalances = generate_initial_balances(Opts),
+    LedgerFields = Extras#{
+        BalanceKey => InitialBalances,
+        <<"ledger-nonce">> => hb_invariant:int(small)
+    },
+    InitializedFields =
+        case BalanceKey of
+            <<"balances">> ->
+                LedgerFields#{
+                    <<"total-supply">> => lists:sum(maps:values(InitialBalances))
+                };
+            _ ->
+                LedgerFields
+        end,
     Ledger =
         dev_token_lib:ledger(
-            Extras#{
-                BalanceKey => generate_initial_balances(Opts),
-                <<"ledger-nonce">> => hb_invariant:int(small)
-            },
+            InitializedFields,
             Opts
         ),
     hb_cache:ensure_all_loaded(Ledger, Opts).
@@ -363,10 +403,10 @@ balances(Prefix, ProcMsg, Opts) ->
     ).
 
 balance(ID, ProcMsg, Opts) ->
-    Account = account_key(ID),
-    case hb_ao:get(<<"balances/", Account/binary>>, ProcMsg, not_found, Opts) of
+    IDKey = id_key(ID),
+    case hb_ao:get(<<"balances/", IDKey/binary>>, ProcMsg, not_found, Opts) of
         not_found ->
-            case hb_ao:get(<<"balance/", Account/binary>>, ProcMsg, not_found, Opts) of
+            case hb_ao:get(<<"balance/", IDKey/binary>>, ProcMsg, not_found, Opts) of
                 not_found ->
                     case hb_ao:get(<<"balances/", ID/binary>>, ProcMsg, not_found, Opts) of
                         not_found ->
@@ -383,15 +423,15 @@ balance(ID, ProcMsg, Opts) ->
 
 canonical_balances(Balances) ->
     maps:fold(
-        fun(Account, Amount, Acc) when is_number(Amount) ->
-            Key = account_key(Account),
+        fun(ID, Amount, Acc) when is_number(Amount) ->
+            Key = id_key(ID),
             Acc#{ Key => maps:get(Key, Acc, 0) + Amount };
-            (_Account, _Amount, Acc) ->
+            (_ID, _Amount, Acc) ->
                 Acc
         end,
         #{},
         Balances
     ).
 
-account_key(Account) when is_binary(Account) ->
-    hb_util:to_lower(Account).
+id_key(ID) when is_binary(ID) ->
+    hb_util:to_lower(ID).

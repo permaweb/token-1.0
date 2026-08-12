@@ -6,30 +6,66 @@
 -define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>). 
 
 opts() ->
+    ensure_lib_token(),
     hb:init(),
-    {ok, Config} = hb_opts:load("config.json", #{}),
-    Config#{
+    #{
         <<"priv-wallet">> => ar_wallet:new(),
-        <<"store">> => [hb_test_utils:test_store() | default_stores()]
+        <<"store">> => [hb_test_utils:test_store()]
     }.
-
-default_stores() ->
-    hb_opts:get(store, [], hb_opts:default_message()).
 
 id(Bin) when is_binary(Bin) ->
     BitSize = byte_size(Bin) * 8,
     Suffix = <<0:(256 - BitSize)>>,
-    <<Bin/binary, Suffix/binary>>;
+    hb_util:human_id(<<Bin/binary, Suffix/binary>>);
 id(Other) ->
     hb_util:human_id(Other).
 
-account_key(Account) ->
-    hb_util:to_lower(Account).
+id_key(ID) ->
+    hb_util:to_lower(hb_ao:normalize_key(ID)).
+
+ensure_lib_token() ->
+    case code:ensure_loaded(lib_token) of
+        {module, lib_token} ->
+            ok;
+        {error, _} ->
+            Source = lib_token_source(),
+            case compile:file(
+                Source,
+                [
+                    debug_info,
+                    binary,
+                    {i, "src"},
+                    {i, "_build/default/lib/hb/src"},
+                    {i, "_build/default/lib/hb/include"}
+                ]
+            ) of
+                {ok, lib_token, Beam} ->
+                    case code:load_binary(lib_token, Source, Beam) of
+                        {module, lib_token} -> ok;
+                        {error, already_loaded} -> ok;
+                        Other -> erlang:error({lib_token_load_failed, Other})
+                    end;
+                Other ->
+                    erlang:error({lib_token_compile_failed, Other})
+            end
+    end.
+
+lib_token_source() ->
+    Candidates =
+        [filename:join(["_build/default/lib/hb", "src", "preloaded", "token", "lib_token.erl"])] ++
+            case code:lib_dir(hb) of
+                {error, _} -> [];
+                HBDir -> [filename:join([HBDir, "src", "preloaded", "token", "lib_token.erl"])]
+            end,
+    case lists:dropwhile(fun(Path) -> not filelib:is_regular(Path) end, Candidates) of
+        [Path | _] -> Path;
+        [] -> filename:join(["_build/default/lib/hb", "src", "preloaded", "token", "lib_token.erl"])
+    end.
 
 canonical_balances(Balances) ->
     maps:fold(
-        fun(Account, Amount, Acc) ->
-            Key = account_key(Account),
+        fun(ID, Amount, Acc) ->
+            Key = id_key(ID),
             Acc#{ Key => maps:get(Key, Acc, 0) + Amount }
         end,
         #{},
@@ -66,15 +102,29 @@ token_state(Params, Opts) ->
         ),
     hb_message:commit(Base, Opts).
 
-balance(State, Account, Opts) ->
+raw_token_state(Fields, Opts) ->
+    hb_message:commit(
+        maps:merge(
+            #{
+                <<"device">> => <<"token@1.0">>,
+                <<"name">> => <<"Test Token">>,
+                <<"ticker">> => <<"TEST">>,
+                <<"denomination">> => 0
+            },
+            Fields
+        ),
+        Opts
+    ).
+
+balance(State, ID, Opts) ->
     Balances = hb_ao:get(<<"balances">>, State, Opts),
-    case hb_ao:resolve(Balances, account_key(Account), Opts) of
+    case hb_ao:resolve(Balances, id_key(ID), Opts) of
         {ok, Amount} -> Amount;
         {error, not_found} -> 0
     end.
 
-public_balance(State, Account, Opts) ->
-    dev_token:balance(State, #{ <<"balance">> => Account }, Opts).
+public_balance(State, ID, Opts) ->
+    dev_token:balance(State, #{ <<"balance">> => ID }, Opts).
 
 outbox(State, Opts) ->
     hb_util:message_to_ordered_list(
@@ -132,6 +182,15 @@ subscription_req(Action, Target, Listener, Slot) ->
             }
     }.
 
+subscription_policy(Action, Target, Listener) ->
+    [
+        #{
+            <<"action">> => Action,
+            <<"target">> => Target,
+            <<"listener">> => Listener
+        }
+    ].
+
 has_message(Pairs, Msgs, Opts) ->
     lists:any(
         fun(Msg) ->
@@ -160,13 +219,26 @@ transfer(State, From, To, Quantity, Opts) ->
         Opts
     ).
 
+tag_only_tx(Wallet, Tags) ->
+    Signed = ar_tx:sign(#tx{ format = 2, reward = 1, tags = Tags }, Wallet),
+    hb_message:convert(Signed, <<"structured@1.0">>, <<"tx@1.0">>, #{}).
+
+process_id(Process, Opts) ->
+    {ok, Committed} = hb_message:with_only_committed(Process, Opts),
+    hb_message:id(Committed, signed, Opts).
+
 mint(State, From, Recipient, Quantity, Opts) ->
+    mint(State, From, Recipient, Quantity, next_mint_nonce(State, Opts), Opts).
+
+mint(State, From, Recipient, Quantity, MintNonce, Opts) ->
     dev_token:handle_action(
         <<"mint">>,
         State,
         #{
             <<"body">> =>
                 #{
+                    <<"action">> => <<"Mint">>,
+                    <<"mint-nonce">> => MintNonce,
                     <<"from">> => From,
                     <<"recipient">> => Recipient,
                     <<"quantity">> => Quantity
@@ -174,6 +246,29 @@ mint(State, From, Recipient, Quantity, Opts) ->
         },
         Opts
     ).
+
+mint_batch(State, From, Quantities, Opts) ->
+    mint_batch(State, From, Quantities, next_mint_nonce(State, Opts), Opts).
+
+mint_batch(State, From, Quantities, MintNonce, Opts) ->
+    dev_token:handle_action(
+        <<"mint">>,
+        State,
+        #{
+            <<"body">> =>
+                #{
+                    <<"action">> => <<"Mint">>,
+                    <<"mint-nonce">> => MintNonce,
+                    <<"from">> => From,
+                    <<"mode">> => <<"batch">>,
+                    <<"quantities">> => Quantities
+                }
+        },
+        Opts
+    ).
+
+next_mint_nonce(State, Opts) ->
+    hb_ao:get(<<"mint-nonce">>, State, -1, Opts) + 1.
 
 set_field(State, From, Fields, Opts) ->
     dev_token:handle_action(
@@ -196,7 +291,7 @@ signed_set_field(State, From, Fields, Opts) ->
         Opts
     ).
 
-balance_existing_account_test() ->
+balance_existing_id_test() ->
     Opts = opts(),
     Alice = id(<<"alice">>),
     Base =
@@ -206,7 +301,168 @@ balance_existing_account_test() ->
         ),
     ?assertEqual({ok, 7}, public_balance(Base, Alice, Opts)).
 
-mixed_case_initial_balance_uses_canonical_account_test() ->
+scheduled_non_compute_paths_rejected_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Base = token_state(#{ initial_balances => #{ Alice => 7 } }, Opts),
+    lists:foreach(
+        fun(Path) ->
+            {ok, Ignored} =
+                hb_ao:resolve(
+                    Base,
+                    #{
+                        <<"path">> => Path,
+                        <<"type">> => <<"Assignment">>,
+                        <<"slot">> => 0,
+                        <<"body">> => #{}
+                    },
+                    Opts
+                ),
+            ?assertEqual(7, balance(Ignored, Alice, Opts)),
+            ?assertEqual(7, hb_ao:get(<<"total-supply">>, Ignored, Opts))
+        end,
+        [<<"mint">>, <<"balances">>, <<"compute/balances">>]
+    ),
+    {ok, IgnoredEnvelope} =
+        hb_ao:resolve(
+            Base,
+            #{
+                <<"path">> => <<"mint">>,
+                <<"slot">> => 0,
+                <<"process">> => id(<<"process">>),
+                <<"body">> => #{}
+            },
+            Opts
+        ),
+    ?assertEqual(7, balance(IgnoredEnvelope, Alice, Opts)),
+    ?assertMatch({ok, _}, hb_ao:resolve(Base, <<"balances">>, Opts)),
+    ?assertEqual(
+        {ok, 7},
+        hb_ao:resolve(
+            Base,
+            #{ <<"path">> => <<"balance">>, <<"balance">> => Alice },
+            Opts
+        )
+    ).
+
+all_mode_unrelated_target_assignment_is_ignored_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 100 },
+                extra =>
+                    #{
+                        <<"scheduler-device">> => <<"arweave-scheduler@1.0">>,
+                        <<"scheduler-mode">> => <<"all">>
+                    }
+            },
+            Opts
+        ),
+    Assignment =
+        #{
+            <<"path">> => <<"compute">>,
+            <<"type">> => <<"Assignment">>,
+            <<"slot">> => 42,
+            <<"body">> =>
+                #{
+                    <<"target">> => id(<<"other-process">>),
+                    <<"action">> => <<"transfer">>,
+                    <<"from">> => Alice,
+                    <<"recipient">> => Bob,
+                    <<"quantity">> => 10
+                }
+        },
+    {ok, Ignored} = dev_token:compute(Base, Assignment, Opts),
+    ?assertEqual(Base, Ignored),
+    ?assertEqual(100, balance(Ignored, Alice, Opts)),
+    ?assertEqual(0, balance(Ignored, Bob, Opts)),
+    ?assertEqual(not_found, hb_ao:get(<<"dedup">>, Ignored, not_found, Opts)),
+    ?assertEqual(not_found, hb_ao:get(<<"results/outbox">>, Ignored, not_found, Opts)).
+
+all_mode_tag_only_target_assignment_is_ignored_test() ->
+    Opts = opts(),
+    AliceWallet = ar_wallet:new(),
+    Alice = hb_util:human_id(ar_wallet:to_address(AliceWallet)),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 100 },
+                extra =>
+                    #{
+                        <<"scheduler-device">> => <<"arweave-scheduler@1.0">>,
+                        <<"scheduler-mode">> => <<"all">>,
+                        <<"security-device">> => <<"security@1.0">>
+                    }
+            },
+            Opts
+        ),
+    ProcessID = process_id(Base, Opts),
+    Body =
+        tag_only_tx(
+            AliceWallet,
+            [
+                {<<"target">>, ProcessID},
+                {<<"action">>, <<"transfer">>},
+                {<<"recipient">>, Bob},
+                {<<"quantity">>, <<"10">>}
+            ]
+        ),
+    Assignment =
+        #{
+            <<"path">> => <<"compute">>,
+            <<"type">> => <<"Assignment">>,
+            <<"slot">> => 43,
+            <<"process">> => ProcessID,
+            <<"body">> => Body
+        },
+    ?assertEqual(ProcessID, hb_ao:get(<<"target">>, Body, not_found, Opts)),
+    {ok, Ignored} = dev_token:compute(Base, Assignment, Opts),
+    ?assertEqual(Base, Ignored),
+    ?assertEqual(100, balance(Ignored, Alice, Opts)),
+    ?assertEqual(0, balance(Ignored, Bob, Opts)),
+    ?assertEqual(not_found, hb_ao:get(<<"dedup">>, Ignored, not_found, Opts)).
+
+duplicate_quantity_tags_are_not_first_match_transfer_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 100 }
+            },
+            Opts
+        ),
+    Body0 =
+        hb_message:convert(
+            #tx{
+                format = 2,
+                tags =
+                    [
+                        {<<"recipient">>, Bob},
+                        {<<"quantity">>, <<"10">>},
+                        {<<"Quantity">>, <<"90">>}
+                    ]
+            },
+            <<"structured@1.0">>,
+            <<"tx@1.0">>,
+            Opts
+        ),
+    {ok, Ignored} =
+        dev_token:handle_action(
+            <<"transfer">>,
+            Base,
+            #{ <<"body">> => Body0#{ <<"from">> => Alice } },
+            Opts
+        ),
+    ?assertEqual(100, balance(Ignored, Alice, Opts)),
+    ?assertEqual(0, balance(Ignored, Bob, Opts)).
+
+mixed_case_initial_balance_uses_canonical_id_test() ->
     Opts = opts(),
     Alice = id(<<"Alice">>),
     Base =
@@ -216,9 +472,9 @@ mixed_case_initial_balance_uses_canonical_account_test() ->
         ),
     Balances = hb_ao:get(<<"balances">>, Base, Opts),
     ?assertEqual({error, not_found}, hb_ao:resolve(Balances, Alice, Opts)),
-    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, account_key(Alice), Opts)),
+    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, id_key(Alice), Opts)),
     ?assertEqual({ok, 7}, public_balance(Base, Alice, Opts)),
-    ?assertEqual({ok, 7}, public_balance(Base, account_key(Alice), Opts)).
+    ?assertEqual({ok, 7}, public_balance(Base, id_key(Alice), Opts)).
 
 init_canonicalizes_raw_initial_balances_test() ->
     Opts = opts(),
@@ -226,17 +482,13 @@ init_canonicalizes_raw_initial_balances_test() ->
     {ok, RawBalances} =
         hb_ao:resolve(
             #{ <<"device">> => <<"trie@1.0">> },
-            #{ Alice => 7, <<"path">> => <<"set">> },
+            #{ Alice => 7, id_key(Alice) => 3, <<"path">> => <<"set">> },
             Opts
         ),
     Base =
-        hb_message:commit(
+        raw_token_state(
             #{
-                <<"device">> => <<"token@1.0">>,
-                <<"name">> => <<"Test Token">>,
-                <<"ticker">> => <<"TEST">>,
-                <<"denomination">> => 0,
-                <<"total-supply">> => 7,
+                <<"total-supply">> => 10,
                 <<"balances">> => RawBalances
             },
             Opts
@@ -244,10 +496,93 @@ init_canonicalizes_raw_initial_balances_test() ->
     {ok, Initialized} = dev_token:init(Base, #{}, Opts),
     Balances = hb_ao:get(<<"balances">>, Initialized, Opts),
     ?assertEqual({error, not_found}, hb_ao:resolve(Balances, Alice, Opts)),
-    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, account_key(Alice), Opts)),
+    ?assertEqual({ok, 10}, hb_ao:resolve(Balances, id_key(Alice), Opts)),
+    ?assertEqual({ok, 10}, public_balance(Initialized, Alice, Opts)).
+
+init_rejects_invalid_initial_balances_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    MixedAlice = id(<<"Alice">>),
+    Bob = id(<<"bob">>),
+    Cases =
+        [
+            {
+                #{ Alice => 100, Bob => -90 },
+                10,
+                <<"Balance amounts must be non-negative integers.">>
+            },
+            {
+                #{ MixedAlice => 7, Bob => <<"three">> },
+                10,
+                <<"Balance amounts must be non-negative integers.">>
+            },
+            {
+                #{ MixedAlice => 7, <<" invalid">> => 3 },
+                10,
+                <<"Address contains unsupported characters.">>
+            }
+        ],
+    lists:foreach(
+        fun({Balances, TotalSupply, Error}) ->
+            Base =
+                raw_token_state(
+                    #{
+                        <<"balances">> => Balances,
+                        <<"total-supply">> => TotalSupply
+                    },
+                    Opts
+                ),
+            ?assertEqual({error, Error}, dev_token:init(Base, #{}, Opts))
+        end,
+        Cases
+    ).
+
+init_rejects_invalid_total_supply_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Balances = #{ Alice => 7 },
+    lists:foreach(
+        fun(TotalSupply) ->
+            Base =
+                raw_token_state(
+                    #{
+                        <<"balances">> => Balances,
+                        <<"total-supply">> => TotalSupply
+                    },
+                    Opts
+                ),
+            ?assertEqual(
+                {error, <<"Total supply must be a non-negative integer.">>},
+                dev_token:init(Base, #{}, Opts)
+            )
+        end,
+        [-1, <<"seven">>]
+    ),
+    Mismatched =
+        raw_token_state(
+            #{ <<"balances">> => Balances, <<"total-supply">> => 6 },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Total supply does not match balances.">>},
+        dev_token:init(Mismatched, #{}, Opts)
+    ).
+
+init_seeds_initial_holder_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Base =
+        raw_token_state(
+            #{
+                <<"initial-holder">> => Alice,
+                <<"total-supply">> => <<"7">>
+            },
+            Opts
+        ),
+    {ok, Initialized} = dev_token:init(Base, #{}, Opts),
     ?assertEqual({ok, 7}, public_balance(Initialized, Alice, Opts)).
 
-balance_missing_account_returns_zero_test() ->
+balance_missing_id_returns_zero_test() ->
     Opts = opts(),
     Alice = id(<<"alice">>),
     Bob = id(<<"bob">>),
@@ -258,19 +593,19 @@ balance_missing_account_returns_zero_test() ->
         ),
     ?assertEqual({ok, 0}, public_balance(Base, Bob, Opts)).
 
-balance_reserved_account_rejected_test() ->
+balance_reserved_id_rejected_test() ->
     Opts = opts(),
     Base = token_state(#{}, Opts),
     ?assertEqual(
-        {error, <<"Address is a reserved ao/custom key">>},
+        {error, <<"Address uses the reserved path key.">>},
         public_balance(Base, <<"path">>, Opts)
     ).
 
-uppercase_reserved_account_rejected_test() ->
+uppercase_reserved_id_rejected_test() ->
     Opts = opts(),
     Base = token_state(#{}, Opts),
     ?assertEqual(
-        {error, <<"Address is a reserved ao/custom key">>},
+        {error, <<"Address uses the reserved path key.">>},
         public_balance(Base, <<"PATH">>, Opts)
     ),
     ?assertEqual(
@@ -303,6 +638,145 @@ basic_transfer_updates_balances_test() ->
         lists:sort([hb_ao:get(<<"action">>, Notice, Opts) || Notice <- Notices])
     ).
 
+zero_transfer_emits_notices_without_balance_writes_test() ->
+    Opts = opts(),
+    Treasury = id(<<"treasury">>),
+    Sender = id(<<"sender">>),
+    Recipient = id(<<"recipient">>),
+    Base = token_state(#{ initial_balances => #{ Treasury => 1 } }, Opts),
+    Balances = hb_ao:get(<<"balances">>, Base, Opts),
+    {ok, Updated} = transfer(Base, Sender, Recipient, 0, Opts),
+    UpdatedBalances = hb_ao:get(<<"balances">>, Updated, Opts),
+    ?assertEqual(Balances, UpdatedBalances),
+    ?assertEqual(
+        {error, not_found},
+        hb_ao:resolve(UpdatedBalances, id_key(Sender), Opts)
+    ),
+    ?assertEqual(
+        {error, not_found},
+        hb_ao:resolve(UpdatedBalances, id_key(Recipient), Opts)
+    ),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Updated, Opts)),
+    Notices = outbox(Updated, Opts),
+    ?assertEqual(2, length(Notices)),
+    ?assert(lists:all(
+        fun(Notice) -> hb_ao:get(<<"quantity">>, Notice, Opts) =:= 0 end,
+        Notices
+    )).
+
+transfer_enabled_defaults_to_opts_test() ->
+    Opts = (opts())#{ <<"transfer-enabled">> => false },
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{ initial_balances => #{ Alice => 5 } },
+            Opts
+        ),
+    {ok, Updated} = transfer(Base, Alice, Bob, 1, Opts),
+    ?assertEqual(5, balance(Updated, Alice, Opts)),
+    ?assertEqual(0, balance(Updated, Bob, Opts)),
+    [Notice] = outbox(Updated, Opts),
+    ?assertEqual(Alice, hb_ao:get(<<"target">>, Notice, Opts)),
+    ?assertEqual(<<"Transfers are disabled.">>, hb_ao:get(<<"reason">>, Notice, Opts)).
+
+transfer_enabled_state_overrides_opts_test() ->
+    Opts = (opts())#{ <<"transfer-enabled">> => false },
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 5 },
+                extra => #{ <<"transfer-enabled">> => true }
+            },
+            Opts
+        ),
+    {ok, Updated} = transfer(Base, Alice, Bob, 1, Opts),
+    ?assertEqual(4, balance(Updated, Alice, Opts)),
+    ?assertEqual(1, balance(Updated, Bob, Opts)).
+
+transfer_disabled_state_rejects_transfer_test() ->
+    Opts = opts(),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 5 },
+                extra => #{ <<"transfer-enabled">> => false }
+            },
+            Opts
+        ),
+    {ok, Updated} = transfer(Base, Alice, Bob, 1, Opts),
+    ?assertEqual(5, balance(Updated, Alice, Opts)),
+    ?assertEqual(0, balance(Updated, Bob, Opts)),
+    [Notice] = outbox(Updated, Opts),
+    ?assertEqual(Alice, hb_ao:get(<<"target">>, Notice, Opts)),
+    ?assertEqual(<<"Transfers are disabled.">>, hb_ao:get(<<"reason">>, Notice, Opts)).
+
+set_authority_can_toggle_transfer_enabled_test() ->
+    Opts = opts(),
+    Setter = id(<<"setter">>),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 5 },
+                extra =>
+                    #{
+                        <<"set-authority">> => Setter,
+                        <<"transfer-enabled">> => false,
+                        <<"whitelisted-fields">> => [<<"transfer-enabled">>]
+                    }
+            },
+            Opts
+        ),
+    {ok, StillDisabled} = transfer(Base, Alice, Bob, 1, Opts),
+    ?assertEqual(5, balance(StillDisabled, Alice, Opts)),
+    {ok, Enabled} =
+        set_field(Base, Setter, #{ <<"transfer-enabled">> => true }, Opts),
+    {ok, Transferred} = transfer(Enabled, Alice, Bob, 1, Opts),
+    ?assertEqual(4, balance(Transferred, Alice, Opts)),
+    ?assertEqual(1, balance(Transferred, Bob, Opts)),
+    {ok, DisabledAgain} =
+        set_field(Transferred, Setter, #{ <<"transfer-enabled">> => false }, Opts),
+    {ok, Rejected} = transfer(DisabledAgain, Alice, Bob, 1, Opts),
+    ?assertEqual(4, balance(Rejected, Alice, Opts)),
+    ?assertEqual(1, balance(Rejected, Bob, Opts)).
+
+set_authority_m_of_n_can_toggle_transfer_enabled_test() ->
+    Opts = opts(),
+    AdminA = id(<<"admin-a">>),
+    AdminB = id(<<"admin-b">>),
+    AdminC = id(<<"admin-c">>),
+    Alice = id(<<"alice">>),
+    Bob = id(<<"bob">>),
+    Base =
+        token_state(
+            #{
+                initial_balances => #{ Alice => 5 },
+                extra =>
+                    #{
+                        <<"set-authority">> => [AdminA, AdminB, AdminC],
+                        <<"set-authority-match">> => 2,
+                        <<"transfer-enabled">> => false,
+                        <<"whitelisted-fields">> => [<<"transfer-enabled">>]
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Too few acceptable committers present.">>},
+        set_field(Base, AdminA, #{ <<"transfer-enabled">> => true }, Opts)
+    ),
+    {ok, Enabled} =
+        set_field(Base, [AdminA, AdminB], #{ <<"transfer-enabled">> => true }, Opts),
+    {ok, Transferred} = transfer(Enabled, Alice, Bob, 1, Opts),
+    ?assertEqual(4, balance(Transferred, Alice, Opts)),
+    ?assertEqual(1, balance(Transferred, Bob, Opts)).
+
 mixed_case_transfer_updates_canonical_balances_test() ->
     Opts = opts(),
     Alice = id(<<"Alice">>),
@@ -320,8 +794,8 @@ mixed_case_transfer_updates_canonical_balances_test() ->
     {ok, Updated} = transfer(Base, Alice, Bob, 3, Opts),
     ?assertEqual(7, balance(Updated, Alice, Opts)),
     ?assertEqual(4, balance(Updated, Bob, Opts)),
-    ?assertEqual(7, balance(Updated, account_key(Alice), Opts)),
-    ?assertEqual(4, balance(Updated, account_key(Bob), Opts)),
+    ?assertEqual(7, balance(Updated, id_key(Alice), Opts)),
+    ?assertEqual(4, balance(Updated, id_key(Bob), Opts)),
     Notices = outbox(Updated, Opts),
     [Debit] = [
         Notice
@@ -456,6 +930,45 @@ outbox_unsubscribe_removes_listener_test() ->
         ),
     ?assertEqual(1, length(outbox(Updated, Opts))).
 
+token_subscription_policy_test() ->
+    Opts = opts(),
+    Listener = hb_util:human_id(ar_wallet:new()),
+    Other = hb_util:human_id(ar_wallet:new()),
+    Policy = subscription_policy(<<"register">>, <<"broadcast">>, Listener),
+    Base =
+        token_state(
+            #{
+                extra => #{
+                    <<"allowed-subscriptions">> => Policy
+                }
+            },
+            Opts
+        ),
+    lists:foreach(
+        fun(Req) ->
+            ?assertMatch(
+                {error, _},
+                dev_token:handle_action(<<"subscribe">>, Base, Req, Opts)
+            )
+        end,
+        [
+            subscription_req(<<"register">>, default, Other, 40),
+            subscription_req(<<"other">>, default, Listener, 40),
+            subscription_req(<<"register">>, <<"other">>, Listener, 40)
+        ]
+    ),
+    {ok, Subscribed} =
+        dev_token:handle_action(
+            <<"subscribe">>,
+            Base,
+            subscription_req(<<"register">>, default, Listener, 41),
+            Opts
+        ),
+    ?assertEqual(
+        [Listener],
+        outbox_subscribers(Subscribed, <<"register">>, Opts)
+    ).
+
 fixed_supply_transfer_test() ->
     Opts = opts(),
     Alice = id(<<"alice">>),
@@ -493,6 +1006,425 @@ fixed_supply_without_mint_device_cannot_mint_test() ->
     ?assertEqual(1, balance(MintRejected, Owner, Opts)),
     ?assertEqual(0, balance(MintRejected, Minter, Opts)),
     ?assertEqual(1, hb_ao:get(<<"total-supply">>, MintRejected, Opts)).
+
+mint_authority_mint_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"Recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority
+                    }
+            },
+            Opts
+        ),
+    {ok, Minted} = mint(Base, Authority, Recipient, 7, Opts),
+    [Notice] = outbox(Minted, Opts),
+    ?assertEqual(1, balance(Minted, Authority, Opts)),
+    ?assertEqual(7, balance(Minted, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, Minted, Opts)),
+    ?assertEqual(0, hb_ao:get(<<"mint-nonce">>, Minted, Opts)),
+    ?assertEqual(<<"Mint-Notice">>, hb_ao:get(<<"action">>, Notice, Opts)),
+    ?assertEqual(0, hb_ao:get(<<"mint-nonce">>, Notice, Opts)),
+    ?assertEqual(Recipient, hb_ao:get(<<"target">>, Notice, Opts)),
+    ?assertEqual(Recipient, hb_ao:get(<<"recipient">>, Notice, Opts)),
+    ?assertEqual(7, hb_ao:get(<<"quantity">>, Notice, Opts)).
+
+mint_nonce_must_advance_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority
+                    }
+            },
+            Opts
+        ),
+    {ok, Minted} = mint(Base, Authority, Recipient, 7, 10, Opts),
+    ?assertEqual(7, balance(Minted, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, Minted, Opts)),
+    ?assertEqual(10, hb_ao:get(<<"mint-nonce">>, Minted, Opts)),
+    ?assertEqual(
+        {error, <<"Mint nonce must advance.">>},
+        mint(Minted, Authority, Recipient, 7, 10, Opts)
+    ),
+    ?assertEqual(
+        {error, <<"Mint nonce must advance.">>},
+        mint(Minted, Authority, Recipient, 7, 9, Opts)
+    ),
+    {ok, Advanced} = mint(Minted, Authority, Recipient, 1, 12, Opts),
+    ?assertEqual(8, balance(Advanced, Recipient, Opts)),
+    ?assertEqual(9, hb_ao:get(<<"total-supply">>, Advanced, Opts)),
+    ?assertEqual(12, hb_ao:get(<<"mint-nonce">>, Advanced, Opts)).
+
+invalid_mint_nonce_fails_closed_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority
+                    }
+            },
+            Opts
+        ),
+    MissingNonceBody =
+        #{
+            <<"action">> => <<"Mint">>,
+            <<"from">> => Authority,
+            <<"recipient">> => Recipient,
+            <<"quantity">> => 7
+        },
+    ?assertEqual(
+        {error, <<"Mint nonce must be a non-negative integer.">>},
+        dev_token:handle_action(
+            <<"mint">>,
+            Base,
+            #{ <<"body">> => MissingNonceBody },
+            Opts
+        )
+    ),
+    lists:foreach(
+        fun(Nonce) ->
+            ?assertEqual(
+                {error, <<"Mint nonce must be a non-negative integer.">>},
+                mint(Base, Authority, Recipient, 7, Nonce, Opts)
+            )
+        end,
+        [-1, <<"0">>]
+    ),
+    ?assertEqual(0, balance(Base, Recipient, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)),
+    ?assertEqual(not_found, hb_ao:get(<<"mint-nonce">>, Base, not_found, Opts)).
+
+max_supply_is_enforced_by_default_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"max-supply">> => 8
+                    }
+            },
+            Opts
+        ),
+    {ok, AtLimit} = mint(Base, Authority, Recipient, 7, Opts),
+    ?assertEqual(7, balance(AtLimit, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, AtLimit, Opts)),
+    ?assertEqual(
+        {error, <<"Max supply exceeded.">>},
+        mint(AtLimit, Authority, Recipient, 1, Opts)
+    ),
+    ?assertEqual(7, balance(AtLimit, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, AtLimit, Opts)).
+
+max_supply_applies_to_batch_total_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    RecipientA = id(<<"recipient-a">>),
+    RecipientB = id(<<"recipient-b">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"max-supply">> => 10
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Max supply exceeded.">>},
+        mint_batch(Base, Authority, #{ RecipientA => 4, RecipientB => 6 }, Opts)
+    ),
+    ?assertEqual(0, balance(Base, RecipientA, Opts)),
+    ?assertEqual(0, balance(Base, RecipientB, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)),
+    {ok, AtLimit} =
+        mint_batch(
+            Base,
+            Authority,
+            #{ RecipientA => 4, RecipientB => 5 },
+            Opts
+        ),
+    ?assertEqual(4, balance(AtLimit, RecipientA, Opts)),
+    ?assertEqual(5, balance(AtLimit, RecipientB, Opts)),
+    ?assertEqual(10, hb_ao:get(<<"total-supply">>, AtLimit, Opts)).
+
+set_authority_can_disable_max_supply_test() ->
+    Opts = opts(),
+    Setter = id(<<"setter">>),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"max-supply">> => 5,
+                        <<"max-supply-enabled">> => true,
+                        <<"set-authority">> => Setter,
+                        <<"whitelisted-fields">> => [<<"max-supply-enabled">>]
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Max supply exceeded.">>},
+        mint(Base, Authority, Recipient, 5, Opts)
+    ),
+    ?assertEqual(
+        {error, <<"Too few acceptable committers present.">>},
+        set_field(
+            Base,
+            Authority,
+            #{ <<"max-supply-enabled">> => false },
+            Opts
+        )
+    ),
+    {ok, Disabled} =
+        set_field(
+            Base,
+            Setter,
+            #{ <<"max-supply-enabled">> => false },
+            Opts
+        ),
+    {ok, Minted} = mint(Disabled, Authority, Recipient, 5, Opts),
+    ?assertEqual(false, hb_ao:get(<<"max-supply-enabled">>, Minted, Opts)),
+    ?assertEqual(5, balance(Minted, Recipient, Opts)),
+    ?assertEqual(6, hb_ao:get(<<"total-supply">>, Minted, Opts)).
+
+invalid_max_supply_policy_fails_closed_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Common =
+        #{
+            <<"mint-device">> => <<"mint-authority@1.0">>,
+            <<"mint-authority">> => Authority
+        },
+    Cases =
+        [
+            {
+                #{ <<"max-supply-enabled">> => true },
+                <<"Max supply must be a non-negative integer.">>
+            },
+            {
+                #{ <<"max-supply">> => -1 },
+                <<"Max supply must be a non-negative integer.">>
+            },
+            {
+                #{ <<"max-supply">> => 8, <<"max-supply-enabled">> => <<"true">> },
+                <<"Invalid `max-supply-enabled` type.">>
+            }
+        ],
+    lists:foreach(
+        fun({Policy, ExpectedError}) ->
+            Base =
+                token_state(
+                    #{
+                        total_supply => 1,
+                        initial_balances => #{ Authority => 1 },
+                        extra => maps:merge(Common, Policy)
+                    },
+                    Opts
+                ),
+            ?assertEqual(
+                {error, ExpectedError},
+                mint(Base, Authority, Recipient, 7, Opts)
+            ),
+            ?assertEqual(0, balance(Base, Recipient, Opts)),
+            ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts))
+        end,
+        Cases
+    ).
+
+mint_enabled_defaults_to_opts_test() ->
+    Opts = (opts())#{ <<"mint-enabled">> => false },
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Minting is disabled.">>},
+        mint(Base, Authority, Recipient, 7, Opts)
+    ),
+    ?assertEqual(0, balance(Base, Recipient, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)).
+
+mint_enabled_state_overrides_opts_test() ->
+    Opts = (opts())#{ <<"mint-enabled">> => false },
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"mint-enabled">> => true
+                    }
+            },
+            Opts
+        ),
+    {ok, Minted} = mint(Base, Authority, Recipient, 7, Opts),
+    ?assertEqual(7, balance(Minted, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, Minted, Opts)).
+
+set_authority_can_toggle_mint_enabled_test() ->
+    Opts = opts(),
+    Setter = id(<<"setter">>),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"mint-enabled">> => false,
+                        <<"set-authority">> => Setter,
+                        <<"whitelisted-fields">> => [<<"mint-enabled">>]
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Minting is disabled.">>},
+        mint(Base, Authority, Recipient, 7, Opts)
+    ),
+    ?assertEqual(
+        {error, <<"Too few acceptable committers present.">>},
+        set_field(Base, Authority, #{ <<"mint-enabled">> => true }, Opts)
+    ),
+    {ok, Enabled} =
+        set_field(Base, Setter, #{ <<"mint-enabled">> => true }, Opts),
+    {ok, Minted} = mint(Enabled, Authority, Recipient, 7, Opts),
+    ?assertEqual(7, balance(Minted, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, Minted, Opts)),
+    {ok, Disabled} =
+        set_field(Minted, Setter, #{ <<"mint-enabled">> => false }, Opts),
+    ?assertEqual(
+        {error, <<"Minting is disabled.">>},
+        mint(Disabled, Authority, Recipient, 3, Opts)
+    ),
+    ?assertEqual(7, balance(Disabled, Recipient, Opts)),
+    ?assertEqual(8, hb_ao:get(<<"total-supply">>, Disabled, Opts)).
+
+invalid_mint_enabled_type_fails_closed_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority,
+                        <<"mint-enabled">> => <<"true">>
+                    }
+            },
+            Opts
+        ),
+    ?assertEqual(
+        {error, <<"Invalid `mint-enabled` type.">>},
+        mint(Base, Authority, Recipient, 7, Opts)
+    ),
+    ?assertEqual(0, balance(Base, Recipient, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)).
+
+mint_authority_requires_mint_body_action_test() ->
+    Opts = opts(),
+    Authority = id(<<"authority">>),
+    Recipient = id(<<"recipient">>),
+    Base =
+        token_state(
+            #{
+                total_supply => 1,
+                initial_balances => #{ Authority => 1 },
+                extra =>
+                    #{
+                        <<"mint-device">> => <<"mint-authority@1.0">>,
+                        <<"mint-authority">> => Authority
+                    }
+            },
+            Opts
+        ),
+    Body =
+        #{
+            <<"from">> => Authority,
+            <<"recipient">> => Recipient,
+            <<"quantity">> => 7
+        },
+    ?assertEqual(
+        {error, <<"Invalid mint action.">>},
+        dev_token:handle_action(<<"mint">>, Base, #{ <<"body">> => Body }, Opts)
+    ),
+    ?assertEqual(
+        {error, <<"Invalid mint action.">>},
+        dev_token:handle_action(
+            <<"mint">>,
+            Base,
+            #{ <<"body">> => Body#{ <<"action">> => <<"Transfer">> } },
+            Opts
+        )
+    ),
+    ?assertEqual(0, balance(Base, Recipient, Opts)),
+    ?assertEqual(1, hb_ao:get(<<"total-supply">>, Base, Opts)).
 
 fixed_supply_name_token_flow_test() ->
     Opts = opts(),
