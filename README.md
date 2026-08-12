@@ -11,7 +11,7 @@ rebar3 device package --device-src=src,_build/default/lib/hb/src/preloaded/token
 ## test
 
 ```sh
-HB_PORT=0 rebar3 device test
+HB_PORT=0 rebar3 mint-authority-test
 rebar3 eunit-all
 ```
 
@@ -24,25 +24,33 @@ Tokens configured with `swap-device` retain exact, case-sensitive balance keys.
 ## swap-device compatibility
 
 When `swap-device` is configured, every scheduled assignment is settled by that
-device before token execution. `Make-Offer`, `Cancel-Order`, and
-`Register-Interest` are owned by the swap device and do not fall through to the
-token's mint-device hook. Non-target L1 transactions are settled without running
-token semantics; process-targeted token actions continue through deduplication,
-security, outbox, and mint-authority handling.
+device before token execution. The exact wire actions `make-offer`,
+`cancel-order`, and `register-interest` are owned by the swap device and do not
+fall through to the token's mint-device hook. Non-target L1 transactions are
+settled without running token semantics; process-targeted token actions continue
+through deduplication, security, outbox, and mint-authority handling.
 
 Routing uses the real L1 transaction target recorded by `tx@1.0`, rather than a
 projected `Target` tag. The node must provide or pin the implementation named by
 `swap-device` (for Bazar, `arweave-swap@1.0`); it is not bundled in this token
-package.
+package. Every node computing the process must use compatible token and swap
+implementations before clients rely on the resulting state.
+
+Before swap execution, the token removes the balance trie's root commitment so
+the swap device's direct account writes cannot retain stale commitment metadata.
+If balances change, the result is rebuilt as a fresh committed `trie@1.0`; if
+they do not, the prior trie root is reused. This keeps new buyer accounts durable
+through process caching and prevents later slots from changing historical balance
+snapshots.
 
 ## published package
 
 ```bash
 Published device: token@1.0; 
 
-Specification ID: PQm3ftLi1wuT0-xqjj0j6YzF52uJ_X7_1GkN7JsEJgw;
+Specification ID: epys-UUFO_9h5Bu06_IENleTEwzs3yLdjPSPWxQyoBk;
 
-Implementation ID: HNLs3OvUFeVwb0XP2pIuopycIis4GyuHqEkmTRSyCe8;
+Implementation ID: GI9XLarMcDT7IOL2X1XFFrHmTeIosrf48vLAQkGdptw;
 
 Signer: vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0;
 ```

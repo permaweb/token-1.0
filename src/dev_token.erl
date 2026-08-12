@@ -188,48 +188,58 @@ canonicalize_balances(Base, Balances, NeedsWrite, Opts) ->
                 hb_ao:get(<<"total-supply">>, Base, not_found, Opts),
                 <<"Total supply must be a non-negative integer.">>
             ),
-        {ok, Changed, FlatBalances} ?=
-            lists:foldl(
-                fun
-                    (_Key, {error, _} = Error) ->
-                        Error;
-                    (Key, {ok, ChangedAcc, BalancesAcc}) ->
-                        maybe
-                            true ?= lib_token:validate_address(Key, [], Opts),
-                            {ok, Amount0} ?= hb_ao:resolve(Balances, Key, Opts),
-                            {ok, Amount} ?=
-                                nonneg_int(
-                                    Amount0,
-                                    <<"Balance amounts must be non-negative integers.">>
-                                ),
-                            ID = state_id_key(Base, Key, Opts),
-                            {
-                                ok,
-                                ChangedAcc
-                                    orelse (ID =/= Key)
-                                    orelse maps:is_key(ID, BalancesAcc),
-                                add_balance(ID, Amount, BalancesAcc)
-                            }
-                        end
-                end,
-                {ok, NeedsWrite, #{}},
-                trie_keys(Balances, Opts)
-            ),
+        {ok, Changed0, FlatBalances} ?=
+            validated_flat_balances(Base, Balances, Opts),
         true ?= (lists:sum(maps:values(FlatBalances)) =:= TotalSupply) orelse
             {error, <<"Total supply does not match balances.">>},
+        Changed = NeedsWrite orelse Changed0,
         case Changed of
             false ->
                 {ok, Base};
             true ->
-                {ok, NewBalances} =
-                    hb_ao:resolve(
-                        #{<<"device">> => <<"trie@1.0">>},
-                        FlatBalances#{<<"path">> => <<"set">>},
-                        Opts
-                    ),
+                {ok, NewBalances} = committed_balance_trie(FlatBalances, Opts),
                 {ok, hb_maps:put(<<"balances">>, NewBalances, Base, Opts)}
         end
     end.
+
+%% @doc Materialize a balance ledger as a plain address map while validating
+%% every entry. In particular, this removes trie commitments before a device
+%% that performs ordinary map writes is allowed to mutate the ledger.
+validated_flat_balances(Base, Balances0, Opts) ->
+    Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
+    lists:foldl(
+        fun
+            (_Key, {error, _} = Error) ->
+                Error;
+            (Key, {ok, ChangedAcc, BalancesAcc}) ->
+                maybe
+                    true ?= lib_token:validate_address(Key, [], Opts),
+                    {ok, Amount0} ?= hb_ao:resolve(Balances, Key, Opts),
+                    {ok, Amount} ?=
+                        nonneg_int(
+                            Amount0,
+                            <<"Balance amounts must be non-negative integers.">>
+                        ),
+                    ID = state_id_key(Base, Key, Opts),
+                    {
+                        ok,
+                        ChangedAcc
+                            orelse (ID =/= Key)
+                            orelse maps:is_key(ID, BalancesAcc),
+                        add_balance(ID, Amount, BalancesAcc)
+                    }
+                end
+        end,
+        {ok, false, #{}},
+        lists:usort(trie_keys(Balances, Opts))
+    ).
+
+committed_balance_trie(FlatBalances, Opts) ->
+    hb_ao:resolve(
+        #{<<"device">> => <<"trie@1.0">>},
+        FlatBalances#{<<"path">> => <<"set">>},
+        Opts
+    ).
 
 %% @doc Entrypoint for computations on token processes. If `swap-device' is
 %% configured, it sees the assignment first. Swap-owned and non-target L1
@@ -302,16 +312,85 @@ settle_swap(Base, Assignment, Opts) ->
 
 run_swap_device(SwapDevice, Base, Assignment, Opts) ->
     BaseDevice = hb_maps:get(<<"device">>, Base, <<"token@1.0">>, Opts),
-    try hb_ao:resolve(Base#{ <<"device">> => SwapDevice }, Assignment, Opts) of
-        {ok, Settled} when is_map(Settled) ->
-            restore_device(BaseDevice, Settled, Opts);
-        Error ->
-            ?event(token_short, {swap_device_error, Error}, Opts),
+    try prepare_swap_balances(Base, Opts) of
+        {ok, PreparedBase, OriginalBalances, MutableBalances} ->
+            case
+                hb_ao:resolve(
+                    PreparedBase#{ <<"device">> => SwapDevice },
+                    Assignment,
+                    Opts
+                )
+            of
+                {ok, Settled} when is_map(Settled) ->
+                    case
+                        finalize_swap_balances(
+                            Settled,
+                            OriginalBalances,
+                            MutableBalances,
+                            Opts
+                        )
+                    of
+                        {ok, Persistable} ->
+                            restore_device(BaseDevice, Persistable, Opts);
+                        {error, Reason} ->
+                            ?event(token_short, {swap_balance_finalize_error, Reason}, Opts),
+                            Base
+                    end;
+                Error ->
+                    ?event(token_short, {swap_device_error, Error}, Opts),
+                    Base
+            end;
+        {error, Reason} ->
+            ?event(token_short, {swap_balance_prepare_error, Reason}, Opts),
             Base
     catch
         Class:Reason ->
             ?event(token_short, {swap_device_exception, Class, Reason}, Opts),
             Base
+    end.
+
+%% @doc `arweave-swap@1.0' intentionally writes account keys directly into the
+%% balance trie map. Remove the root commitment first, otherwise that raw write
+%% retains a commitment describing the old root and cache writes discard the
+%% new or changed account. Child commitments remain valid and make this common
+%% pre-swap path independent of ledger size.
+prepare_swap_balances(Base, Opts) ->
+    maybe
+        OriginalBalances = hb_maps:get(<<"balances">>, Base, not_found, Opts),
+        true ?= (OriginalBalances =/= not_found) orelse
+            {error, <<"Balances not found.">>},
+        LoadedBalances = hb_cache:ensure_loaded(OriginalBalances, Opts),
+        true ?= is_map(LoadedBalances) orelse {error, <<"Balances must be a map.">>},
+        MutableBalances = hb_message:uncommitted(LoadedBalances, Opts),
+        {
+            ok,
+            hb_maps:put(<<"balances">>, MutableBalances, Base, Opts),
+            OriginalBalances,
+            MutableBalances
+        }
+    end.
+
+%% @doc Rebuild the swap-mutated map as a new committed trie. Besides making
+%% new account keys cache-visible, the fresh root prevents a later slot from
+%% aliasing its writes into an earlier historical balance snapshot. If the swap
+%% did not touch balances, restore the original trie without walking it; this is
+%% the overwhelmingly common path under an all-mode Arweave scheduler.
+finalize_swap_balances(Base, OriginalBalances, MutableBalances, Opts) ->
+    maybe
+        Balances = hb_maps:get(<<"balances">>, Base, not_found, Opts),
+        true ?= (Balances =/= not_found) orelse {error, <<"Balances not found.">>},
+        case Balances =:= MutableBalances of
+            true ->
+                {ok, hb_maps:put(<<"balances">>, OriginalBalances, Base, Opts)};
+            false ->
+                maybe
+                    {ok, _Changed, FlatBalances} ?=
+                        validated_flat_balances(Base, Balances, Opts),
+                    {ok, CommittedBalances} ?=
+                        committed_balance_trie(FlatBalances, Opts),
+                    {ok, hb_maps:put(<<"balances">>, CommittedBalances, Base, Opts)}
+                end
+        end
     end.
 
 %% @doc The compatibility flow only invokes token semantics for a real L1

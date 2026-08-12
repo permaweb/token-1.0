@@ -4,9 +4,11 @@
 -include_lib("hb/include/hb.hrl").
 
 -define(PROCESS_OUTBOX_DEVICE, <<"process-outbox@1.0">>). 
+-define(RAW_SWAP_TEST_DEVICE, <<"raw-balance-swap-test@1.0">>).
 
 opts() ->
     ensure_lib_token(),
+    ensure_raw_swap_test_device(),
     hb:init(),
     #{
         <<"priv-wallet">> => ar_wallet:new(),
@@ -61,6 +63,29 @@ lib_token_source() ->
         [Path | _] -> Path;
         [] -> filename:join(["_build/default/lib/hb", "src", "preloaded", "token", "lib_token.erl"])
     end.
+
+ensure_raw_swap_test_device() ->
+    Module = hb_token_raw_swap_test_device,
+    case code:ensure_loaded(Module) of
+        {module, Module} ->
+            ok;
+        {error, _} ->
+            Source = filename:join(
+                ["src", "preloaded", "test", "hb_token_raw_swap_test_device.erl"]
+            ),
+            case compile:file(Source, [debug_info, binary]) of
+                {ok, Module, Beam} ->
+                    case code:load_binary(Module, Source, Beam) of
+                        {module, Module} -> ok;
+                        {error, already_loaded} -> ok;
+                        Other -> erlang:error({raw_swap_test_device_load_failed, Other})
+                    end;
+                Other ->
+                    erlang:error({raw_swap_test_device_compile_failed, Other})
+            end
+    end,
+    erlang:put({hb_device_load, ?RAW_SWAP_TEST_DEVICE}, Module),
+    ok.
 
 canonical_balances(Balances) ->
     maps:fold(
@@ -576,6 +601,53 @@ swap_non_target_assignment_is_still_settled_test() ->
     ?assertEqual(45, hb_ao:get(<<"results/assignment-slot">>, Settled, Opts)),
     ?assertEqual(not_found, hb_ao:get(<<"dedup">>, Settled, not_found, Opts)),
     ?assertEqual(100, balance(Settled, Alice, Opts)).
+
+swap_raw_balance_writes_are_recommitted_and_snapshot_isolated_test() ->
+    Opts = opts(),
+    Seller = id(<<"Seller">>),
+    Buyer = id(<<"Buyer">>),
+    RawBase =
+        raw_token_state(
+            #{
+                <<"initial-holder">> => Seller,
+                <<"total-supply">> => 100,
+                <<"swap-device">> => ?RAW_SWAP_TEST_DEVICE,
+                <<"test-swap-existing">> => Seller,
+                <<"test-swap-buyer">> => Buyer,
+                <<"test-swap-quantity">> => 10
+            },
+            Opts
+        ),
+    {ok, Initialized} = dev_token:init(RawBase, #{}, Opts),
+    BeforeBalances = hb_ao:get(<<"balances">>, Initialized, Opts),
+    BeforeID = hb_message:id(BeforeBalances, all, Opts),
+    ?assert(hb_message:verify(BeforeBalances, all, Opts)),
+    {ok, _} = hb_cache:write(BeforeBalances, Opts),
+    Assignment =
+        #{
+            <<"path">> => <<"compute">>,
+            <<"type">> => <<"Assignment">>,
+            <<"slot">> => 47,
+            <<"body">> => #{ <<"action">> => <<"Make-Offer">> }
+        },
+    {ok, Updated} = dev_token:compute(Initialized, Assignment, Opts),
+    ?assertEqual(
+        false,
+        hb_ao:get(<<"test-swap-saw-balance-commitments">>, Updated, Opts)
+    ),
+    AfterBalances = hb_ao:get(<<"balances">>, Updated, Opts),
+    AfterID = hb_message:id(AfterBalances, all, Opts),
+    ?assertNotEqual(BeforeID, AfterID),
+    ?assert(hb_message:verify(AfterBalances, all, Opts)),
+    ?assertEqual({ok, 90}, hb_ao:resolve(AfterBalances, Seller, Opts)),
+    ?assertEqual({ok, 10}, hb_ao:resolve(AfterBalances, Buyer, Opts)),
+    {ok, _} = hb_cache:write(AfterBalances, Opts),
+    {ok, CachedAfter} = hb_cache:read(AfterID, Opts),
+    ?assertEqual({ok, 90}, hb_ao:resolve(CachedAfter, Seller, Opts)),
+    ?assertEqual({ok, 10}, hb_ao:resolve(CachedAfter, Buyer, Opts)),
+    {ok, CachedBefore} = hb_cache:read(BeforeID, Opts),
+    ?assertEqual({ok, 100}, hb_ao:resolve(CachedBefore, Seller, Opts)),
+    ?assertEqual({error, not_found}, hb_ao:resolve(CachedBefore, Buyer, Opts)).
 
 duplicate_quantity_tags_are_not_first_match_transfer_test() ->
     Opts = opts(),
