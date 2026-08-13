@@ -32,6 +32,16 @@
         <<"register">>
     ]
 ).
+%% @doc Actions owned entirely by the configured swap device. The swap device
+%% sees every assignment first; these actions must not subsequently enter the
+%% token security/action pipeline.
+-define(SWAP_ACTIONS,
+    [
+        <<"make-offer">>,
+        <<"cancel-order">>,
+        <<"register-interest">>
+    ]
+).
 %% @doc Root-level request envelope/control keys that must never become token
 %% state through `Set'. Authority checks still see the original request.
 -define(SET_CONTROL_KEYS,
@@ -133,7 +143,9 @@ is_compute_path(Req, Opts) ->
         _ -> false
     end.
 
-%% @doc Validate initial supply and canonicalize balance-holder ID keys.
+%% @doc Validate initial supply and canonicalize balance-holder ID keys. Swap
+%% ledgers retain their case-sensitive balance keys, but pass through the same
+%% fail-closed address, quantity, and total-supply validation.
 init(Base, _Req, Opts) ->
     canonicalize_balances(Base, Opts).
 
@@ -147,13 +159,14 @@ snapshot(Base, _Req, _Opts) ->
 
 canonicalize_balances(Base, Opts) ->
     maybe
+        HasBalances = hb_maps:get(<<"balances">>, Base, not_found, Opts) =/= not_found,
         Balances0 = initial_balances(Base, Opts),
         true ?= (Balances0 =/= not_found) orelse
             {error, <<"Balances not found.">>},
         Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
         true ?= is_map(Balances) orelse
             {error, <<"Balances must be a map.">>},
-        canonicalize_balances(Base, Balances, Opts)
+        canonicalize_balances(Base, Balances, not HasBalances, Opts)
     end.
 
 initial_balances(Base, Opts) ->
@@ -168,98 +181,248 @@ initial_balances(Base, Opts) ->
             Balances
     end.
 
-canonicalize_balances(Base, Balances, Opts) ->
+canonicalize_balances(Base, Balances, NeedsWrite, Opts) ->
     maybe
         {ok, TotalSupply} ?=
             nonneg_int(
                 hb_ao:get(<<"total-supply">>, Base, not_found, Opts),
                 <<"Total supply must be a non-negative integer.">>
             ),
-        {ok, Changed, FlatBalances} ?=
-            lists:foldl(
-                fun
-                    (_Key, {error, _} = Error) ->
-                        Error;
-                    (Key, {ok, ChangedAcc, BalancesAcc}) ->
-                        maybe
-                            true ?= lib_token:validate_address(Key, [], Opts),
-                            {ok, Amount0} ?= hb_ao:resolve(Balances, Key, Opts),
-                            {ok, Amount} ?=
-                                nonneg_int(
-                                    Amount0,
-                                    <<"Balance amounts must be non-negative integers.">>
-                                ),
-                            ID = id_key(Key),
-                            {
-                                ok,
-                                ChangedAcc
-                                    orelse (ID =/= Key)
-                                    orelse maps:is_key(ID, BalancesAcc),
-                                add_balance(ID, Amount, BalancesAcc)
-                            }
-                        end
-                end,
-                {ok, false, #{}},
-                trie_keys(Balances, Opts)
-            ),
+        {ok, Changed0, FlatBalances} ?=
+            validated_flat_balances(Base, Balances, Opts),
         true ?= (lists:sum(maps:values(FlatBalances)) =:= TotalSupply) orelse
             {error, <<"Total supply does not match balances.">>},
+        Changed = NeedsWrite orelse Changed0,
         case Changed of
             false ->
                 {ok, Base};
             true ->
-                {ok, NewBalances} =
-                    hb_ao:resolve(
-                        #{<<"device">> => <<"trie@1.0">>},
-                        FlatBalances#{<<"path">> => <<"set">>},
-                        Opts
-                    ),
+                {ok, NewBalances} = committed_balance_trie(FlatBalances, Opts),
                 {ok, hb_maps:put(<<"balances">>, NewBalances, Base, Opts)}
         end
     end.
 
-%% @doc Entrypoint for computations on token processes. Deduplicates by signed
-%% assignment body, then expects the `action' key to hold the `path' to execute
-%% after enforcing the token's security constraints. Always returns the base
-%% state unmodified in the event of downstream device errors, such that invalid
-%% interactions do not result in invalid `~process@1.0' states.
+%% @doc Materialize a balance ledger as a plain address map while validating
+%% every entry. In particular, this removes trie commitments before a device
+%% that performs ordinary map writes is allowed to mutate the ledger.
+validated_flat_balances(Base, Balances0, Opts) ->
+    Balances = hb_cache:ensure_all_loaded(Balances0, Opts),
+    lists:foldl(
+        fun
+            (_Key, {error, _} = Error) ->
+                Error;
+            (Key, {ok, ChangedAcc, BalancesAcc}) ->
+                maybe
+                    true ?= lib_token:validate_address(Key, [], Opts),
+                    {ok, Amount0} ?= hb_ao:resolve(Balances, Key, Opts),
+                    {ok, Amount} ?=
+                        nonneg_int(
+                            Amount0,
+                            <<"Balance amounts must be non-negative integers.">>
+                        ),
+                    ID = state_id_key(Base, Key, Opts),
+                    {
+                        ok,
+                        ChangedAcc
+                            orelse (ID =/= Key)
+                            orelse maps:is_key(ID, BalancesAcc),
+                        add_balance(ID, Amount, BalancesAcc)
+                    }
+                end
+        end,
+        {ok, false, #{}},
+        lists:usort(trie_keys(Balances, Opts))
+    ).
+
+committed_balance_trie(FlatBalances, Opts) ->
+    hb_ao:resolve(
+        #{<<"device">> => <<"trie@1.0">>},
+        FlatBalances#{<<"path">> => <<"set">>},
+        Opts
+    ).
+
+%% @doc Entrypoint for computations on token processes. If `swap-device' is
+%% configured, it sees the assignment first. Swap-owned and non-target L1
+%% assignments return the settled state without entering the token pipeline;
+%% other process-targeted assignments continue through normal token handling.
 compute(Base, Assignment, Opts) ->
     ?event({token_call, Assignment}),
+    case settle_swap(Base, Assignment, Opts) of
+        {disabled, UnsettledBase} ->
+            compute_token(UnsettledBase, Assignment, Opts);
+        {enabled, SettledBase} ->
+            case swap_routes_to_token(Base, Assignment, Opts) of
+                true ->
+                    compute_targeted_token(SettledBase, Assignment, Opts);
+                false ->
+                    ?event(
+                        token_short,
+                        {swap_assignment_settled_without_token_execution, Assignment},
+                        Opts
+                    ),
+                    {ok, SettledBase}
+            end
+    end.
+
+%% @doc Apply the normal scheduler target policy before entering the token
+%% state transition pipeline.
+compute_token(Base, Assignment, Opts) ->
     case assignment_targets_process(Base, Assignment, Opts) of
         true ->
-            case deduplicate(Base, Assignment, Opts) of
-                {skip, DedupedBase} ->
-                    ?event(token_short, {skipping_duplicate_assignment, Assignment}, Opts),
-                    {ok, DedupedBase};
-                {ok, DedupedBase} ->
-                    maybe
-                        {ok, SecureReq} ?= enforce_security(DedupedBase, Assignment, Opts),
-                        {ok, Action} ?= hb_ao:resolve(Assignment, <<"body/action">>, Opts),
-                        {ok, Res} ?= handle_action(Action, DedupedBase, SecureReq, Opts),
-                        ?event(debug_token, {route_result, Res}, Opts),
-                        {ok, Res}
-                    else
-                        {error, Reason} ->
-                            ?event(token_short, {error_during_token_call, Reason}, Opts),
-                            send_error(Base, Assignment, Reason, Opts)
-                    end;
-                {error, Reason} ->
-                    ?event(token_short, {error_during_token_dedup, Reason}, Opts),
-                    send_error(Base, Assignment, Reason, Opts)
-            end;
+            compute_targeted_token(Base, Assignment, Opts);
         false ->
             ?event(token_short, {skipping_non_target_assignment, Assignment}, Opts),
             {ok, Base}
     end.
 
+%% @doc Deduplicate, authorize, and execute an assignment known to target this
+%% token process.
+compute_targeted_token(Base, Assignment, Opts) ->
+    case deduplicate(Base, Assignment, Opts) of
+        {skip, DedupedBase} ->
+            ?event(token_short, {skipping_duplicate_assignment, Assignment}, Opts),
+            {ok, DedupedBase};
+        {ok, DedupedBase} ->
+            maybe
+                {ok, SecureReq} ?= enforce_security(DedupedBase, Assignment, Opts),
+                {ok, Action} ?= hb_ao:resolve(Assignment, <<"body/action">>, Opts),
+                {ok, Res} ?= handle_action(Action, DedupedBase, SecureReq, Opts),
+                ?event(debug_token, {route_result, Res}, Opts),
+                {ok, Res}
+            else
+                {error, Reason} ->
+                    ?event(token_short, {error_during_token_call, Reason}, Opts),
+                    send_error(Base, Assignment, Reason, Opts)
+            end;
+        {error, Reason} ->
+            ?event(token_short, {error_during_token_dedup, Reason}, Opts),
+            send_error(Base, Assignment, Reason, Opts)
+    end.
+
+%% @doc Execute a configured swap device against every assignment before token
+%% routing. Swap failures are isolated and leave the incoming token state
+%% untouched, matching the compatibility device's fail-open settlement policy.
+settle_swap(Base, Assignment, Opts) ->
+    case swap_device(Base, Opts) of
+        not_found ->
+            {disabled, Base};
+        SwapDevice ->
+            {enabled, run_swap_device(SwapDevice, Base, Assignment, Opts)}
+    end.
+
+run_swap_device(SwapDevice, Base, Assignment, Opts) ->
+    BaseDevice = hb_maps:get(<<"device">>, Base, <<"token@1.0">>, Opts),
+    try prepare_swap_balances(Base, Opts) of
+        {ok, PreparedBase, OriginalBalances, MutableBalances} ->
+            case
+                hb_ao:resolve(
+                    PreparedBase#{ <<"device">> => SwapDevice },
+                    Assignment,
+                    Opts
+                )
+            of
+                {ok, Settled} when is_map(Settled) ->
+                    case
+                        finalize_swap_balances(
+                            Settled,
+                            OriginalBalances,
+                            MutableBalances,
+                            Opts
+                        )
+                    of
+                        {ok, Persistable} ->
+                            restore_device(BaseDevice, Persistable, Opts);
+                        {error, Reason} ->
+                            ?event(token_short, {swap_balance_finalize_error, Reason}, Opts),
+                            Base
+                    end;
+                Error ->
+                    ?event(token_short, {swap_device_error, Error}, Opts),
+                    Base
+            end;
+        {error, Reason} ->
+            ?event(token_short, {swap_balance_prepare_error, Reason}, Opts),
+            Base
+    catch
+        Class:Reason ->
+            ?event(token_short, {swap_device_exception, Class, Reason}, Opts),
+            Base
+    end.
+
+%% @doc `arweave-swap@1.0' intentionally writes account keys directly into the
+%% balance trie map. Remove the root commitment first, otherwise that raw write
+%% retains a commitment describing the old root and cache writes discard the
+%% new or changed account. Child commitments remain valid and make this common
+%% pre-swap path independent of ledger size.
+prepare_swap_balances(Base, Opts) ->
+    maybe
+        OriginalBalances = hb_maps:get(<<"balances">>, Base, not_found, Opts),
+        true ?= (OriginalBalances =/= not_found) orelse
+            {error, <<"Balances not found.">>},
+        LoadedBalances = hb_cache:ensure_loaded(OriginalBalances, Opts),
+        true ?= is_map(LoadedBalances) orelse {error, <<"Balances must be a map.">>},
+        MutableBalances = hb_message:uncommitted(LoadedBalances, Opts),
+        {
+            ok,
+            hb_maps:put(<<"balances">>, MutableBalances, Base, Opts),
+            OriginalBalances,
+            MutableBalances
+        }
+    end.
+
+%% @doc Rebuild the swap-mutated map as a new committed trie. Besides making
+%% new account keys cache-visible, the fresh root prevents a later slot from
+%% aliasing its writes into an earlier historical balance snapshot. If the swap
+%% did not touch balances, restore the original trie without walking it; this is
+%% the overwhelmingly common path under an all-mode Arweave scheduler.
+finalize_swap_balances(Base, OriginalBalances, MutableBalances, Opts) ->
+    maybe
+        Balances = hb_maps:get(<<"balances">>, Base, not_found, Opts),
+        true ?= (Balances =/= not_found) orelse {error, <<"Balances not found.">>},
+        case Balances =:= MutableBalances of
+            true ->
+                {ok, hb_maps:put(<<"balances">>, OriginalBalances, Base, Opts)};
+            false ->
+                maybe
+                    {ok, _Changed, FlatBalances} ?=
+                        validated_flat_balances(Base, Balances, Opts),
+                    {ok, CommittedBalances} ?=
+                        committed_balance_trie(FlatBalances, Opts),
+                    {ok, hb_maps:put(<<"balances">>, CommittedBalances, Base, Opts)}
+                end
+        end
+    end.
+
+%% @doc The compatibility flow only invokes token semantics for a real L1
+%% transaction targeting this process and not owned by the swap device.
+swap_routes_to_token(Base, Assignment, Opts) ->
+    l1_assignment_targets_process(Base, Assignment, Opts)
+        andalso not swap_owned_action(Assignment, Opts).
+
+swap_owned_action(Assignment, Opts) ->
+    Body = hb_maps:get(<<"body">>, Assignment, #{}, Opts),
+    case hb_maps:get(<<"action">>, Body, not_found, Opts) of
+        Action when is_binary(Action) ->
+            Normalized = hb_util:to_lower(hb_ao:normalize_key(Action)),
+            lists:member(Normalized, ?SWAP_ACTIONS);
+        _ ->
+            false
+    end.
+
+swap_device(Base, Opts) ->
+    hb_maps:get(<<"swap-device">>, Base, not_found, Opts).
+
 assignment_targets_process(Base, Assignment, Opts) ->
     case all_mode_arweave_scheduler(Base, Opts) of
         true ->
-            Body = hb_maps:get(<<"body">>, Assignment, #{}, Opts),
-            tx_field(Body, <<"target">>, <<>>, Opts) =:= current_process_id(Base, Opts);
+            l1_assignment_targets_process(Base, Assignment, Opts);
         _ ->
             true
     end.
+
+l1_assignment_targets_process(Base, Assignment, Opts) ->
+    Body = hb_maps:get(<<"body">>, Assignment, #{}, Opts),
+    tx_field(Body, <<"target">>, <<>>, Opts) =:= current_process_id(Base, Opts).
 
 all_mode_arweave_scheduler(Base, Opts) ->
     hb_maps:get(<<"scheduler-device">>, Base, not_found, Opts) =:= <<"arweave-scheduler@1.0">>
@@ -323,7 +486,7 @@ balance(Base, Req, Opts) ->
     maybe
         {ok, ID0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
         true ?= lib_token:validate_address(ID0, [], Opts),
-        ID = id_key(ID0),
+        ID = state_id_key(Base, ID0, Opts),
         ?event(
             debug_token,
             {balance_request,
@@ -379,8 +542,8 @@ transfer(Base, Assignment, Opts) ->
         % validate From/Recipient sanity
         true ?= lib_token:validate_address(From0, [], Opts),
         true ?= lib_token:validate_address(Recipient0, [], Opts),
-        From = id_key(From0),
-        Recipient = id_key(Recipient0),
+        From = state_id_key(Base, From0, Opts),
+        Recipient = state_id_key(Base, Recipient0, Opts),
         % Normalize the base's minting state for the sender.
         {ok, NormBase} ?=
             case Quantity of
@@ -507,7 +670,7 @@ mint_request(Base, Assignment, Opts) ->
                             hb_ao:set(
                                 Assignment,
                                 <<"subject">>,
-                                id_key(Subject),
+                                state_id_key(Base, Subject, Opts),
                                 Opts
                             ),
                         as_mint_device(<<"mint">>, Base, MintReq1, Opts)
@@ -648,6 +811,15 @@ trie_keys(Balances, Opts) ->
 
 id_key(ID) when is_binary(ID) ->
     hb_util:to_lower(hb_ao:normalize_key(ID)).
+
+%% @doc Balance-trie key policy. Standard tokens retain canonical lowercase AO
+%% keys; swap-compatible ledgers preserve the external ID exactly because the
+%% swap device's state is case-sensitive.
+state_id_key(Base, ID, Opts) when is_binary(ID) ->
+    case swap_device(Base, Opts) of
+        not_found -> id_key(ID);
+        _ -> ID
+    end.
 
 add_balance(ID, Amount, Balances) ->
     Balances#{ ID => maps:get(ID, Balances, 0) + Amount }.

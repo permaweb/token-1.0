@@ -11,7 +11,7 @@ rebar3 device package --device-src=src,_build/default/lib/hb/src/preloaded/token
 ## test
 
 ```sh
-HB_PORT=0 rebar3 device test
+HB_PORT=0 rebar3 mint-authority-test
 rebar3 eunit-all
 ```
 
@@ -19,15 +19,38 @@ rebar3 eunit-all
 
 Initialization requires valid addresses with non-negative integer balances and a
 non-negative `total-supply` equal to their sum. Invalid genesis state fails closed.
+Tokens configured with `swap-device` retain exact, case-sensitive balance keys.
+
+## swap-device compatibility
+
+When `swap-device` is configured, every scheduled assignment is settled by that
+device before token execution. The exact wire actions `make-offer`,
+`cancel-order`, and `register-interest` are owned by the swap device and do not
+fall through to the token's mint-device hook. Non-target L1 transactions are
+settled without running token semantics; process-targeted token actions continue
+through deduplication, security, outbox, and mint-authority handling.
+
+Routing uses the real L1 transaction target recorded by `tx@1.0`, rather than a
+projected `Target` tag. The node must provide or pin the implementation named by
+`swap-device` (for Bazar, `arweave-swap@1.0`); it is not bundled in this token
+package. Every node computing the process must use compatible token and swap
+implementations before clients rely on the resulting state.
+
+Before swap execution, the token removes the balance trie's root commitment so
+the swap device's direct account writes cannot retain stale commitment metadata.
+If balances change, the result is rebuilt as a fresh committed `trie@1.0`; if
+they do not, the prior trie root is reused. This keeps new buyer accounts durable
+through process caching and prevents later slots from changing historical balance
+snapshots.
 
 ## published package
 
 ```bash
 Published device: token@1.0; 
 
-Specification ID: pXHakE4TUBUBg4JFnsCmcvXSis7WMXsUtAP5AzOqmjc;
+Specification ID: epys-UUFO_9h5Bu06_IENleTEwzs3yLdjPSPWxQyoBk;
 
-Implementation ID: PcMKkrsgVld-4JR63GnRaumlqm1icACGDPUGm86wB1I;
+Implementation ID: GI9XLarMcDT7IOL2X1XFFrHmTeIosrf48vLAQkGdptw;
 
 Signer: vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0;
 ```
