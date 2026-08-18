@@ -665,8 +665,7 @@ state_account_key(Base, Address, Opts) ->
     end.
 
 trie_keys(Balances, Opts) ->
-    {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
-    Trie:keys(Balances, Opts).
+    hb_ao:keys(Balances, Opts).
 
 is_reserved_trie_key(Key, ReservedKeys) ->
     lists:member(Key, ReservedKeys).
