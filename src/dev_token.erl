@@ -111,7 +111,73 @@ info() ->
 
 %% @doc Seed a flat on-chain process, then canonicalize its balance trie.
 init(Base, _Req, Opts) ->
-    canonicalize_balances(seed_holding(Base, Opts), Opts).
+    Materialized = materialize_balances(Base, Opts),
+    canonicalize_balances(seed_holding(Materialized, Opts), Opts).
+
+%% @doc Retain the resolved balance message while the originating store is in
+%% scope. Returning the original lazy `balances+link' makes later cache reads
+%% depend on a temporary path that may no longer be resolvable.
+materialize_balances(Base, Opts) ->
+    case maps:find(<<"balances">>, Base) of
+        error -> Base;
+        {ok, RawBalances} ->
+            Balances = load_balances(RawBalances, Opts),
+            hb_ao:set(
+                Base,
+                <<"/">>,
+                #{
+                    <<"balances">> => Balances,
+                    <<"set-mode">> => <<"explicit">>
+                },
+                Opts
+            )
+    end.
+
+%% Fast Arweave scheduler headers are cached locally, while an explicit
+%% `balances+link' still names an on-chain message. Prefer its recorded scope,
+%% then retry only an unavailable link through remote stores.
+load_balances(
+        Link = {link, ID,
+            LinkOpts = #{ <<"type">> := <<"link">>, <<"lazy">> := true }},
+        Opts
+    ) ->
+    UnscopedOpts = hb_util:deep_merge(Opts, LinkOpts, Opts),
+    LocalOpts =
+        hb_store:scope(
+            UnscopedOpts,
+            hb_opts:get(scope, local, LinkOpts)
+        ),
+    case hb_cache:read(ID, LocalOpts) of
+        {ok, TargetID} when is_binary(TargetID) ->
+            load_balances(
+                {link,
+                    TargetID,
+                    #{
+                        <<"type">> => <<"link">>,
+                        <<"lazy">> => false,
+                        <<"scope">> => remote
+                    }},
+                Opts
+            );
+        _ ->
+            hb_cache:ensure_loaded(Link, Opts)
+    end;
+load_balances(Link = {link, ID, LinkOpts}, Opts) ->
+    try hb_cache:ensure_loaded(Link, Opts)
+    catch
+        throw:{necessary_message_not_found, _, _} ->
+            hb_cache:ensure_loaded(
+                {link, ID, LinkOpts#{ <<"scope">> => remote }},
+                Opts
+            );
+        throw:{could_not_read_lazy_link, _, _, _} ->
+            hb_cache:ensure_loaded(
+                {link, ID, LinkOpts#{ <<"scope">> => remote }},
+                Opts
+            )
+    end;
+load_balances(Balances, _Opts) ->
+    Balances.
 
 %% @doc No-op on normalization.
 normalize(Base, _Req, _Opts) ->

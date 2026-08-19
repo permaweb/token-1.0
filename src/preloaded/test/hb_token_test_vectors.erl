@@ -248,6 +248,35 @@ init_canonicalizes_raw_initial_balances_test() ->
     ?assertEqual({ok, 7}, hb_ao:resolve(Balances, account_key(Alice), Opts)),
     ?assertEqual({ok, 7}, public_balance(Initialized, Alice, Opts)).
 
+init_materializes_lazy_linked_swap_balances_test() ->
+    Opts = opts(),
+    Alice = id(<<"Alice">>),
+    {ok, RawBalances} =
+        hb_ao:resolve(
+            #{ <<"device">> => <<"trie@1.0">> },
+            #{ Alice => 7, <<"path">> => <<"set">> },
+            Opts
+        ),
+    {ok, BalancesID} = hb_cache:write(RawBalances, Opts),
+    Base =
+        hb_link:decode_all_links(#{
+            <<"device">> => <<"token@1.0">>,
+            <<"swap-device">> => <<"arweave-swap@1.0">>,
+            <<"total-supply">> => 7,
+            <<"balances+link">> => BalancesID
+        }),
+    ?assert(?IS_LINK(maps:get(<<"balances">>, Base))),
+    {ok, Initialized} = dev_token:init(Base, #{}, Opts),
+    Materialized = maps:get(<<"balances">>, Initialized),
+    ?assertNot(?IS_LINK(Materialized)),
+    ?assertEqual({ok, 7}, hb_ao:resolve(Materialized, Alice, Opts)),
+    {ok, StateID} = hb_cache:write(Initialized, Opts),
+    {ok, Cached} = hb_cache:read(StateID, Opts),
+    ?assertEqual(
+        {ok, 7},
+        hb_ao:resolve(hb_ao:get(<<"balances">>, Cached, Opts), Alice, Opts)
+    ).
+
 balance_missing_account_returns_zero_test() ->
     Opts = opts(),
     Alice = id(<<"alice">>),
