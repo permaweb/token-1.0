@@ -251,13 +251,18 @@ seed_holding(Base, Opts) ->
             Base;
         {_, Balances} when Balances =/= not_found ->
             Base;
+        {not_found, not_found} ->
+            Base#{
+                <<"balances">> => initial_balance_trie(#{}, Opts)
+            };
         {Holder, not_found} when is_binary(Holder) ->
             case hb_util:safe_int(
                 hb_maps:get(<<"total-supply">>, Base, 1, Opts)
             ) of
                 {ok, Supply} when Supply >= 0 ->
                     Base#{
-                        <<"balances">> => #{ Holder => Supply }
+                        <<"balances">> =>
+                            initial_balance_trie(#{ Holder => Supply }, Opts)
                     };
                 _ ->
                     Base
@@ -265,6 +270,15 @@ seed_holding(Base, Opts) ->
         _ ->
             Base
     end.
+
+initial_balance_trie(Balances, Opts) ->
+    {ok, Trie} =
+        hb_ao:resolve(
+            #{<<"device">> => <<"trie@1.0">>},
+            Balances#{<<"path">> => <<"set">>},
+            Opts
+        ),
+    Trie.
 
 %% @doc Read a value from the real L1 transaction fields recorded in its
 %% `tx@1.0' commitment. A top-level key can be an ordinary tag with the same
