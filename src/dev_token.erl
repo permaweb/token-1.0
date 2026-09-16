@@ -109,9 +109,9 @@ info() ->
             ]
     }.
 
-%% @doc Seed a flat on-chain process, then canonicalize its balance trie.
+%% @doc Seed a flat on-chain process, preserving exact balance keys.
 init(Base, _Req, Opts) ->
-    canonicalize_balances(seed_holding(Base, Opts), Opts).
+    {ok, seed_holding(Base, Opts)}.
 
 %% @doc No-op on normalization.
 normalize(Base, _Req, _Opts) ->
@@ -120,57 +120,6 @@ normalize(Base, _Req, _Opts) ->
 %% @doc No special processing for the creation of snapshots.
 snapshot(Base, _Req, _Opts) ->
     {ok, Base}.
-
-canonicalize_balances(Base, Opts) ->
-    case hb_maps:get(<<"swap-device">>, Base, not_found, Opts) of
-        not_found ->
-            canonicalize_standard_balances(Base, Opts);
-        _ ->
-            % Arweave addresses are case-sensitive, and `arweave-swap@1.0'
-            % settles against the exact signer addresses carried by L1.
-            {ok, Base}
-    end.
-
-canonicalize_standard_balances(Base, Opts) ->
-    case hb_maps:get(<<"balances">>, Base, not_found, Opts) of
-        not_found -> {ok, Base};
-        Balances0 ->
-            case hb_cache:ensure_all_loaded(Balances0, Opts) of
-                Balances when is_map(Balances) ->
-                    canonicalize_balances(Base, Balances, Opts);
-                _ ->
-                    {ok, Base}
-            end
-    end.
-
-canonicalize_balances(Base, Balances, Opts) ->
-    {Changed, FlatBalances} =
-        lists:foldl(
-            fun(Key, {ChangedAcc, BalancesAcc}) ->
-                Account = account_key(Key),
-                {ok, Amount} = hb_ao:resolve(Balances, Key, Opts),
-                {
-                    ChangedAcc
-                        orelse (Account =/= Key)
-                        orelse maps:is_key(Account, BalancesAcc),
-                    add_balance(Account, Amount, BalancesAcc)
-                }
-            end,
-            {false, #{}},
-            trie_keys(Balances, Opts)
-        ),
-    case Changed of
-        false ->
-            {ok, Base};
-        true ->
-            {ok, NewBalances} =
-                hb_ao:resolve(
-                    #{<<"device">> => <<"trie@1.0">>},
-                    FlatBalances#{<<"path">> => <<"set">>},
-                    Opts
-                ),
-            {ok, hb_maps:put(<<"balances">>, NewBalances, Base, Opts)}
-    end.
 
 %% @doc Entrypoint for computations on token processes. A token configured with
 %% a scalar `swap-device' is scheduled in `all' mode, so every assignment is
@@ -247,8 +196,6 @@ seed_holding(Base, Opts) ->
         hb_maps:get(<<"initial-holder">>, Base, not_found, Opts),
         hb_maps:get(<<"balances">>, Base, not_found, Opts)
     } of
-        {not_found, _} ->
-            Base;
         {_, Balances} when Balances =/= not_found ->
             Base;
         {not_found, not_found} ->
@@ -340,14 +287,12 @@ handle_action(Action, Base, Req, Opts) ->
 %% account before returning.
 balance(Base, Req, Opts) ->
     maybe
-        {ok, Account0} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
-        true ?= validate_address(Account0, [], Opts),
-        Account = state_account_key(Base, Account0, Opts),
+        {ok, Account} ?= hb_ao:resolve(Req, <<"balance">>, Opts),
+        true ?= validate_address(Account, [], Opts),
         ?event(
             debug_token,
             {balance_request,
-                {account, Account0},
-                {canonical_account, Account},
+                {account, Account},
                 {base, Base}
             },
             Opts
@@ -386,8 +331,8 @@ transfer(Base, Assignment, Opts) ->
     maybe
         % Gather transfer data from the request.
         {ok, Req} ?= hb_ao:resolve(Assignment, <<"body">>, Opts),
-        {ok, From0} ?= hb_ao:resolve(Req, <<"from">>, Opts),
-        {ok, Recipient0} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
+        {ok, From} ?= hb_ao:resolve(Req, <<"from">>, Opts),
+        {ok, Recipient} ?= hb_ao:resolve(Req, <<"recipient">>, Opts),
         {ok, Quantity0} ?= hb_ao:resolve(Req, <<"quantity">>, Opts),
         Quantity =
             case hb_util:safe_int(Quantity0) of
@@ -395,17 +340,21 @@ transfer(Base, Assignment, Opts) ->
                 _ -> Quantity0
             end,
         % validate From/Recipient sanity
-        true ?= validate_address(From0, [], Opts),
-        true ?= validate_address(Recipient0, [], Opts),
-        From = state_account_key(Base, From0, Opts),
-        Recipient = state_account_key(Base, Recipient0, Opts),
-        % Normalize the base's minting state for the sender.
+        true ?= validate_address(From, [], Opts),
+        true ?= validate_address(Recipient, [], Opts),
+        % Normalize the sender's minting state for nonzero transfers.
         {ok, NormBase} ?=
-            normalize_mint(
-                Base,
-                Assignment#{ <<"subject">> => From },
-                Opts
-            ),
+            case Quantity of
+                0 -> {ok, Base};
+                _ ->
+                    normalize_mint(
+                        Base,
+                        Assignment#{
+                            <<"body">> => hb_ao:set(Req, <<"subject">>, From, Opts)
+                        },
+                        Opts
+                    )
+            end,
         % Retrieve balances from the base state.
         Balances = hb_ao:get(<<"balances">>, NormBase, Opts),
         ?event(debug_token, {balances_before_transfer, Balances}, Opts),
@@ -430,9 +379,9 @@ transfer(Base, Assignment, Opts) ->
             orelse {error, <<"Quantity must be a non-negative integer.">>},
         true ?= (SenderBalance >= Quantity) 
             orelse {error, <<"Insufficient balance.">>},
-        % Handle self-transfer: skip balance updates
+        % Handle zero and self transfers without balance-trie writes.
         NewBaseAfterTransfer =
-            case From =:= Recipient of
+            case (Quantity =:= 0) orelse (From =:= Recipient) of
                 true -> NormBase;
                 false ->
                     {ok, NewBalances} =
@@ -449,7 +398,7 @@ transfer(Base, Assignment, Opts) ->
             end,
         % Send transfer notices.
         {ok, WithNotices} ?= outbox_send(
-            transfer_notices(From0, Recipient0, Quantity, Req, Opts),
+            transfer_notices(From, Recipient, Quantity, Req, Opts),
             NewBaseAfterTransfer,
             Opts
         ),
@@ -508,7 +457,7 @@ mint(Base, Assignment, Opts) ->
                             hb_ao:set(
                                 Assignment,
                                 <<"subject">>,
-                                state_account_key(Base, Subject, Opts),
+                                Subject,
                                 Opts
                             ),
                         as_mint_device(<<"mint">>, Base, MintReq1, Opts)
@@ -672,25 +621,12 @@ validate_address(_, _, _) ->
 account_key(Address) when is_binary(Address) ->
     hb_util:to_lower(Address).
 
-state_account_key(Base, Address, Opts) ->
-    case hb_maps:get(<<"swap-device">>, Base, not_found, Opts) of
-        not_found -> account_key(Address);
-        _ -> Address
-    end.
-
-trie_keys(Balances, Opts) ->
-    {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
-    Trie:keys(Balances, Opts).
-
 is_reserved_trie_key(Key, ReservedKeys) ->
     lists:member(Key, ReservedKeys).
 
 trie_reserved_keys(Opts) ->
     {ok, Trie} = hb_device_load:reference(<<"trie@1.0">>, Opts),
     maps:get(reserved, Trie:info(), []).
-
-add_balance(Account, Amount, Balances) ->
-    Balances#{ Account => maps:get(Account, Balances, 0) + Amount }.
 
 %% @doc Check if the given Key exists in the passed List
 is_reserved_custom_key(Key, List) when is_binary(Key), is_list(List) ->

@@ -214,11 +214,7 @@ process_id(Process, Req, Opts) ->
 balance(ProcMsg, User, Opts) when not ?IS_ID(User) ->
     balance(ProcMsg, hb_util:human_id(ar_wallet:to_address(User)), Opts);
 balance(ProcMsg, ID, Opts) ->
-    Account = account_key(ID),
-    case hb_ao:get(<<"now/balances/", Account/binary>>, ProcMsg, not_found, Opts) of
-        not_found -> hb_ao:get(<<"now/balances/", ID/binary>>, ProcMsg, 0, Opts);
-        Balance -> Balance
-    end.
+    hb_ao:get(<<"now/balances/", ID/binary>>, ProcMsg, 0, Opts).
 
 %% @doc Retrieve a single balance through the execution device's `balance`
 %% path, allowing lazy mint devices to normalize account state first.
@@ -488,16 +484,13 @@ normalize_env(Procs) when is_list(Procs) ->
 normalize_without_root(RootProc, Procs) ->
     maps:without([hb_message:id(RootProc, all)], normalize_env(Procs)).
 
-account_key(Account) when is_binary(Account) ->
-    hb_util:to_lower(Account).
-
 canonical_balances(Balances) ->
     lists:foldl(
         fun
             ({ID, Amount}, Acc) when ?IS_ID(ID) ->
-                add_balance(account_key(hb_util:human_id(ID)), Amount, Acc);
+                add_balance(hb_util:human_id(ID), Amount, Acc);
             ({Wallet, Amount}, Acc) when is_tuple(Wallet) ->
-                add_balance(account_key(hb_util:human_id(Wallet)), Amount, Acc);
+                add_balance(hb_util:human_id(Wallet), Amount, Acc);
             (_Other, Acc) ->
                 Acc
         end,
