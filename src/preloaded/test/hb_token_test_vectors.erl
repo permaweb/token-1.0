@@ -320,6 +320,41 @@ basic_transfer_updates_balances_test() ->
         lists:sort([hb_ao:get(<<"action">>, Notice, Opts) || Notice <- Notices])
     ).
 
+zero_transfer_skips_mint_and_trie_writes_test() ->
+    Opts = opts(),
+    {Wallet, Sender} = party(),
+    Recipient = hb_util:human_id(id(<<"Bob">>)),
+    Base0 = token_state(#{}, Opts),
+    Base = hb_ao:set(Base0, #{
+        <<"process">> => Base0,
+        <<"mint-device">> => #{
+            <<"mint">> => fun(MintBase, _, MintOpts) ->
+                {ok, hb_ao:set(MintBase, <<"mint-called">>, true, MintOpts)}
+            end
+        }
+    }, Opts),
+    Body = hb_message:commit(#{
+        <<"action">> => <<"transfer">>,
+        <<"recipient">> => Recipient,
+        <<"quantity">> => <<"0">>
+    }, #{ <<"priv-wallet">> => Wallet }),
+    {ok, Updated} = hb_ao:resolve(Base, asset_assignment(Body, 1), Opts),
+    ?assertEqual(not_found, hb_ao:get(<<"mint-called">>, Updated, Opts)),
+    ?assertEqual(
+        hb_message:id(hb_ao:get(<<"balances">>, Base, Opts), all, Opts),
+        hb_message:id(hb_ao:get(<<"balances">>, Updated, Opts), all, Opts)
+    ),
+    Notices = outbox(Updated, Opts),
+    ?assertEqual(2, length(Notices)),
+    ?assert(has_message([
+        {<<"action">>, <<"Debit-Notice">>},
+        {<<"target">>, Sender}, {<<"quantity">>, 0}
+    ], Notices, Opts)),
+    ?assert(has_message([
+        {<<"action">>, <<"Credit-Notice">>},
+        {<<"target">>, Recipient}, {<<"quantity">>, 0}
+    ], Notices, Opts)).
+
 transfer_mint_uses_sender_and_preserves_context_test() ->
     Opts = opts(),
     {Wallet, Sender} = party(),

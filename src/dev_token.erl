@@ -344,15 +344,19 @@ transfer(Base, Assignment, Opts) ->
         % validate From/Recipient sanity
         true ?= validate_address(From, [], Opts),
         true ?= validate_address(Recipient, [], Opts),
-        % Normalize the base's minting state for the sender.
+        % Normalize the sender's minting state for nonzero transfers.
         {ok, NormBase} ?=
-            normalize_mint(
-                Base,
-                Assignment#{
-                    <<"body">> => hb_ao:set(Req, <<"subject">>, From, Opts)
-                },
-                Opts
-            ),
+            case Quantity of
+                0 -> {ok, Base};
+                _ ->
+                    normalize_mint(
+                        Base,
+                        Assignment#{
+                            <<"body">> => hb_ao:set(Req, <<"subject">>, From, Opts)
+                        },
+                        Opts
+                    )
+            end,
         % Retrieve balances from the base state.
         Balances = hb_ao:get(<<"balances">>, NormBase, Opts),
         ?event(debug_token, {balances_before_transfer, Balances}, Opts),
@@ -377,9 +381,9 @@ transfer(Base, Assignment, Opts) ->
             orelse {error, <<"Quantity must be a non-negative integer.">>},
         true ?= (SenderBalance >= Quantity) 
             orelse {error, <<"Insufficient balance.">>},
-        % Handle self-transfer: skip balance updates
+        % Handle zero and self transfers without balance-trie writes.
         NewBaseAfterTransfer =
-            case From =:= Recipient of
+            case (Quantity =:= 0) orelse (From =:= Recipient) of
                 true -> NormBase;
                 false ->
                     {ok, NewBalances} =
