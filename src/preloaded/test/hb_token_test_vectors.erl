@@ -24,22 +24,8 @@ id(Bin) when is_binary(Bin) ->
 id(Other) ->
     hb_util:human_id(Other).
 
-account_key(Account) ->
-    hb_util:to_lower(Account).
-
-canonical_balances(Balances) ->
-    maps:fold(
-        fun(Account, Amount, Acc) ->
-            Key = account_key(Account),
-            Acc#{ Key => maps:get(Key, Acc, 0) + Amount }
-        end,
-        #{},
-        Balances
-    ).
-
 token_state(Params, Opts) ->
-    InitialBalances =
-        canonical_balances(maps:get(initial_balances, Params, #{})),
+    InitialBalances = maps:get(initial_balances, Params, #{}),
     TotalSupply =
         maps:get(
             total_supply,
@@ -69,13 +55,17 @@ token_state(Params, Opts) ->
 
 balance(State, Account, Opts) ->
     Balances = hb_ao:get(<<"balances">>, State, Opts),
-    case hb_ao:resolve(Balances, account_key(Account), Opts) of
+    case hb_ao:resolve(Balances, Account, Opts) of
         {ok, Amount} -> Amount;
         {error, not_found} -> 0
     end.
 
 public_balance(State, Account, Opts) ->
-    dev_token:balance(State, #{ <<"balance">> => Account }, Opts).
+    hb_ao:resolve(
+        State,
+        #{ <<"path">> => <<"balance">>, <<"balance">> => Account },
+        Opts
+    ).
 
 outbox(State, Opts) ->
     hb_util:message_to_ordered_list(
@@ -207,27 +197,29 @@ balance_existing_account_test() ->
         ),
     ?assertEqual({ok, 7}, public_balance(Base, Alice, Opts)).
 
-mixed_case_initial_balance_uses_canonical_account_test() ->
+mixed_case_initial_balance_preserves_account_test() ->
     Opts = opts(),
-    Alice = id(<<"Alice">>),
+    Alice = hb_util:human_id(id(<<"Alice">>)),
+    LowerAlice = hb_util:to_lower(Alice),
     Base =
         token_state(
             #{ initial_balances => #{ Alice => 7 } },
             Opts
         ),
     Balances = hb_ao:get(<<"balances">>, Base, Opts),
-    ?assertEqual({error, not_found}, hb_ao:resolve(Balances, Alice, Opts)),
-    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, account_key(Alice), Opts)),
+    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, Alice, Opts)),
+    ?assertEqual({error, not_found}, hb_ao:resolve(Balances, LowerAlice, Opts)),
     ?assertEqual({ok, 7}, public_balance(Base, Alice, Opts)),
-    ?assertEqual({ok, 7}, public_balance(Base, account_key(Alice), Opts)).
+    ?assertEqual({ok, 0}, public_balance(Base, LowerAlice, Opts)).
 
-init_canonicalizes_raw_initial_balances_test() ->
+init_preserves_case_distinct_initial_balances_test() ->
     Opts = opts(),
-    Alice = id(<<"Alice">>),
+    Alice = hb_util:human_id(id(<<"Alice">>)),
+    LowerAlice = hb_util:to_lower(Alice),
     {ok, RawBalances} =
         hb_ao:resolve(
             #{ <<"device">> => <<"trie@1.0">> },
-            #{ Alice => 7, <<"path">> => <<"set">> },
+            #{ Alice => 7, LowerAlice => 3, <<"path">> => <<"set">> },
             Opts
         ),
     Base =
@@ -237,16 +229,17 @@ init_canonicalizes_raw_initial_balances_test() ->
                 <<"name">> => <<"Test Token">>,
                 <<"ticker">> => <<"TEST">>,
                 <<"denomination">> => 0,
-                <<"total-supply">> => 7,
+                <<"total-supply">> => 10,
                 <<"balances">> => RawBalances
             },
             Opts
         ),
-    {ok, Initialized} = dev_token:init(Base, #{}, Opts),
+    {ok, Initialized} = hb_ao:resolve(Base, <<"init">>, Opts),
     Balances = hb_ao:get(<<"balances">>, Initialized, Opts),
-    ?assertEqual({error, not_found}, hb_ao:resolve(Balances, Alice, Opts)),
-    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, account_key(Alice), Opts)),
-    ?assertEqual({ok, 7}, public_balance(Initialized, Alice, Opts)).
+    ?assertEqual({ok, 7}, hb_ao:resolve(Balances, Alice, Opts)),
+    ?assertEqual({ok, 3}, hb_ao:resolve(Balances, LowerAlice, Opts)),
+    ?assertEqual({ok, 7}, public_balance(Initialized, Alice, Opts)),
+    ?assertEqual({ok, 3}, public_balance(Initialized, LowerAlice, Opts)).
 
 balance_missing_account_returns_zero_test() ->
     Opts = opts(),
@@ -258,6 +251,28 @@ balance_missing_account_returns_zero_test() ->
             Opts
         ),
     ?assertEqual({ok, 0}, public_balance(Base, Bob, Opts)).
+
+mint_preserves_subject_case_test() ->
+    Opts = opts(),
+    Subject = hb_util:human_id(id(<<"Alice">>)),
+    Base = #{
+        <<"device">> => <<"token@1.0">>,
+        <<"process">> => ?ASSET_PROCESS,
+        <<"mint-device">> => #{
+            <<"mint">> => fun(_, Req, MintOpts) ->
+                hb_ao:resolve(Req, <<"subject">>, MintOpts)
+            end
+        }
+    },
+    ?assertEqual(
+        {ok, Subject},
+        hb_ao:resolve(
+            Base,
+            #{ <<"path">> => <<"mint">>,
+               <<"body">> => #{ <<"subject">> => Subject } },
+            Opts
+        )
+    ).
 
 balance_reserved_account_rejected_test() ->
     Opts = opts(),
@@ -304,25 +319,35 @@ basic_transfer_updates_balances_test() ->
         lists:sort([hb_ao:get(<<"action">>, Notice, Opts) || Notice <- Notices])
     ).
 
-mixed_case_transfer_updates_canonical_balances_test() ->
+mixed_case_transfer_preserves_distinct_balances_test() ->
     Opts = opts(),
-    Alice = id(<<"Alice">>),
-    Bob = id(<<"Bob">>),
+    {AliceWallet, Alice} = party(),
+    Bob = hb_util:human_id(id(<<"Bob">>)),
+    LowerAlice = hb_util:to_lower(Alice),
+    LowerBob = hb_util:to_lower(Bob),
     Base =
         token_state(
             #{
                 initial_balances => #{
                     Alice => 10,
-                    Bob => 1
+                    Bob => 1,
+                    LowerAlice => 2,
+                    LowerBob => 5
                 }
             },
             Opts
         ),
-    {ok, Updated} = transfer(Base, Alice, Bob, 3, Opts),
+    Body = asset_tx(AliceWallet, #{
+        <<"target">> => ?ASSET_PROCESS,
+        <<"action">> => <<"transfer">>,
+        <<"recipient">> => Bob,
+        <<"quantity">> => <<"3">>
+    }),
+    {ok, Updated} = hb_ao:resolve(Base, asset_assignment(Body, 1), Opts),
     ?assertEqual(7, balance(Updated, Alice, Opts)),
     ?assertEqual(4, balance(Updated, Bob, Opts)),
-    ?assertEqual(7, balance(Updated, account_key(Alice), Opts)),
-    ?assertEqual(4, balance(Updated, account_key(Bob), Opts)),
+    ?assertEqual(2, balance(Updated, LowerAlice, Opts)),
+    ?assertEqual(5, balance(Updated, LowerBob, Opts)),
     Notices = outbox(Updated, Opts),
     [Debit] = [
         Notice

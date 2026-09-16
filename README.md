@@ -64,7 +64,7 @@ raw state paths are only for inspection:
 
 ```bash
 GET /<token-id>/balances/<exact-raw-key>
-GET /<token-id>/now/balances/<canonical-key>
+GET /<token-id>/now/balances/<exact-raw-key>
 ```
 
 dont use `/<token-id>~token@1.0/balance?...` as the normal client path. That
