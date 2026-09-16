@@ -348,7 +348,9 @@ transfer(Base, Assignment, Opts) ->
         {ok, NormBase} ?=
             normalize_mint(
                 Base,
-                Assignment#{ <<"subject">> => From },
+                Assignment#{
+                    <<"body">> => hb_ao:set(Req, <<"subject">>, From, Opts)
+                },
                 Opts
             ),
         % Retrieve balances from the base state.

@@ -269,6 +269,7 @@ mint_preserves_subject_case_test() ->
         hb_ao:resolve(
             Base,
             #{ <<"path">> => <<"mint">>,
+               <<"subject">> => hb_util:human_id(id(<<"Bob">>)),
                <<"body">> => #{ <<"subject">> => Subject } },
             Opts
         )
@@ -318,6 +319,40 @@ basic_transfer_updates_balances_test() ->
         [<<"Credit-Notice">>, <<"Debit-Notice">>],
         lists:sort([hb_ao:get(<<"action">>, Notice, Opts) || Notice <- Notices])
     ).
+
+transfer_mint_uses_sender_and_preserves_context_test() ->
+    Opts = opts(),
+    {Wallet, Sender} = party(),
+    Recipient = hb_util:human_id(id(<<"Bob">>)),
+    Base0 = token_state(#{ initial_balances => #{ Sender => 10 } }, Opts),
+    Base = hb_ao:set(Base0, #{
+        <<"process">> => Base0,
+        <<"mint-device">> => #{
+            <<"mint">> => fun(MintBase, MintReq, MintOpts) ->
+                {ok, hb_ao:set(MintBase, <<"mint-request">>, MintReq, MintOpts)}
+            end
+        }
+    }, Opts),
+    Body = asset_tx(Wallet, #{
+        <<"target">> => ?ASSET_PROCESS,
+        <<"action">> => <<"transfer">>,
+        <<"from">> => Recipient,
+        <<"subject">> => Recipient,
+        <<"recipient">> => Recipient,
+        <<"quantity">> => <<"3">>
+    }),
+    Assignment = (asset_assignment(Body, 7))#{ <<"timestamp">> => 123456 },
+    {ok, Updated} = hb_ao:resolve(Base, Assignment, Opts),
+    MintReq = hb_ao:get(<<"mint-request">>, Updated, Opts),
+    ?assertEqual(Sender, hb_ao:get(<<"subject">>, MintReq, Opts)),
+    ?assertEqual(Sender, hb_ao:get(<<"body/subject">>, MintReq, Opts)),
+    ?assertEqual(Sender, hb_ao:get(<<"body/from">>, MintReq, Opts)),
+    ?assertEqual(123456, hb_ao:get(<<"timestamp">>, MintReq, Opts)),
+    ?assertEqual(7, hb_ao:get(<<"slot">>, MintReq, Opts)),
+    ?assertEqual(7, hb_ao:get(<<"block-height">>, MintReq, Opts)),
+    ?assertEqual(?ASSET_PROCESS, hb_ao:get(<<"process">>, MintReq, Opts)),
+    ?assertEqual(7, balance(Updated, Sender, Opts)),
+    ?assertEqual(3, balance(Updated, Recipient, Opts)).
 
 mixed_case_transfer_preserves_distinct_balances_test() ->
     Opts = opts(),
