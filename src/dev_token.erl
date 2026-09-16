@@ -196,8 +196,6 @@ seed_holding(Base, Opts) ->
         hb_maps:get(<<"initial-holder">>, Base, not_found, Opts),
         hb_maps:get(<<"balances">>, Base, not_found, Opts)
     } of
-        {not_found, _} ->
-            Base;
         {_, Balances} when Balances =/= not_found ->
             Base;
         {not_found, not_found} ->

@@ -212,6 +212,18 @@ mixed_case_initial_balance_preserves_account_test() ->
     ?assertEqual({ok, 7}, public_balance(Base, Alice, Opts)),
     ?assertEqual({ok, 0}, public_balance(Base, LowerAlice, Opts)).
 
+init_without_holder_or_balances_creates_empty_trie_test() ->
+    Opts = opts(),
+    Base = #{ <<"device">> => <<"token@1.0">>, <<"total-supply">> => 0 },
+    {ok, Initialized} = hb_ao:resolve(Base, <<"init">>, Opts),
+    Balances = hb_ao:get(<<"balances">>, Initialized, Opts),
+    ?assertMatch(#{ <<"device">> := <<"trie@1.0">> }, Balances),
+    ?assertEqual(
+        {error, not_found},
+        hb_ao:resolve(Balances, hb_util:human_id(id(<<"Alice">>)), Opts)
+    ),
+    ?assertEqual(0, hb_ao:get(<<"total-supply">>, Initialized, Opts)).
+
 init_preserves_case_distinct_initial_balances_test() ->
     Opts = opts(),
     Alice = hb_util:human_id(id(<<"Alice">>)),
