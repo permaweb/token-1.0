@@ -1032,6 +1032,49 @@ swap_asset_transfer_updates_live_owner_test() ->
     ?assertEqual(0, asset_balance(Transferred, Owner, Opts)),
     ?assertEqual(1, asset_balance(Transferred, Recipient, Opts)).
 
+malformed_actions_do_not_block_transfer_test() ->
+    Opts = opts(),
+    {OwnerWallet, Owner} = party(),
+    {_, Recipient} = party(),
+    lists:foreach(
+        fun(Swap) ->
+            Seeded = asset_base(Owner, Opts),
+            Base = case Swap of
+                true -> Seeded;
+                false ->
+                    {ok, Standard} = hb_ao:resolve(
+                        hb_maps:remove(<<"swap-device">>, Seeded, Opts),
+                        <<"init">>,
+                        Opts
+                    ),
+                    Standard
+            end,
+            Unchanged = lists:foldl(
+                fun(Action, State) ->
+                    Body = asset_tx(OwnerWallet, #{
+                        <<"target">> => ?ASSET_PROCESS,
+                        <<"action">> => Action
+                    }),
+                    {ok, Next} = hb_ao:resolve(
+                        State, asset_assignment(Body, 100), Opts),
+                    ?assertEqual(1, asset_balance(Next, Owner, Opts)),
+                    ?assertEqual(0, asset_balance(Next, Recipient, Opts)),
+                    Next
+                end,
+                Base,
+                [3.14, #{}, [3.14]]
+            ),
+            {ok, Transferred} = hb_ao:resolve(
+                Unchanged,
+                asset_assignment(asset_transfer(OwnerWallet, Recipient), 101),
+                Opts
+            ),
+            ?assertEqual(0, asset_balance(Transferred, Owner, Opts)),
+            ?assertEqual(1, asset_balance(Transferred, Recipient, Opts))
+        end,
+        [true, false]
+    ).
+
 scalar_initial_holder_requires_valid_scalars_test() ->
     Opts = opts(),
     {_, Owner} = party(),

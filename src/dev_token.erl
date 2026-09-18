@@ -187,10 +187,8 @@ compute(Base, Assignment, Opts) ->
             ProcID = hb_maps:get(<<"process">>, Assignment, <<>>, Opts),
             case tx_field(Body, <<"target">>, <<>>, Opts) of
                 ProcID ->
-                    case hb_util:to_lower(
-                        hb_ao:normalize_key(
-                            hb_maps:get(<<"action">>, Body, <<>>, Opts)
-                        )
+                    case normalize_action(
+                        hb_maps:get(<<"action">>, Body, <<>>, Opts)
                     ) of
                         <<"make-offer">> -> {ok, Settled};
                         <<"cancel-order">> -> {ok, Settled};
@@ -314,12 +312,19 @@ enforce_security(Base, Req, Opts) ->
 %% upon the `action' specified.
 handle_action(Action, Base, Req, Opts) ->
     ?event(token_short, {token_action, Action}, Opts),
-    case hb_util:to_lower(hb_ao:normalize_key(Action)) of
+    case normalize_action(Action) of
         <<"transfer">> -> transfer(Base, Req, Opts);
         <<"set">> -> secure_set(Base, Req, Opts);
         <<"subscribe">> -> outbox_subscribe(Base, Req, Opts);
         <<"unsubscribe">> -> outbox_unsubscribe(Base, Req, Opts);
         MintDevAction -> action_as_mint_device(MintDevAction, Base, Req, Opts)
+    end.
+
+%% @doc Malformed action values follow the unsupported-action path.
+normalize_action(Action) ->
+    try hb_util:to_lower(hb_ao:normalize_key(Action))
+    catch
+        error:_ -> <<>>
     end.
 
 %% @doc Get the balance for an account. Normalize the minting state for that
