@@ -19,11 +19,11 @@ rebar3 eunit-all
 ```bash
 device publish: token@1.0 
 
-spec=7LWK7RCyMKCZ1uiANJ5At1vfsiwra1T_5xkBG3X_so0
+spec=Y0oqgFc3B88Xz_RcgWn2PlgJtUn7uzCH0aPtlAChXGY
 
-impl=TmTc-Tjo8WWrp6Th8Kgqs7azjIKHgyNIcvZ6NW-zvps
+impl=yGNpkVZIP2Ou1VRCn9Nw7yeJJ_HqYe42umDKEnpB7MU
 
-signer=eFNj8Xo_fbPWkEFL47YgEHctsxs03jk6fSGDr_xTiFY
+signer=vZY2XY1RD9HIfWi8ift-1_DnHLDadZMWrufSh-_rKF0
 ```
 ## local node
 
